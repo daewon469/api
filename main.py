@@ -44,19 +44,11 @@ app = FastAPI()
 bearer = HTTPBearer(auto_error=True)
 
 import settings
-from recode import ensure_recode_columns, router as recode_router
-from research import register_research_startup, router as research_router
-from routers.auth import router as auth_router
-from routers.billing import router as billing_router
 from routers.internal import register_rss_startup, router as internal_router
 from routers.notify import create_notification, get_user_id_by_username, router as notify_router, send_push
 from routers.payments import router as payments_router
-from routers.play import router as play_router
-from routers.parking_play import router as parking_play_router
-from routers.parking_popup import router as parking_popup_router
 from routers.upload import mount_static, router as upload_router
 from routers.community import router as community_router
-from routers.parking import router as parking_router
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -73,21 +65,12 @@ app.add_middleware(
 
 mount_static(app)
 
-app.include_router(recode_router)
-app.include_router(research_router)
-app.include_router(auth_router)
-app.include_router(play_router)
-app.include_router(billing_router)
 app.include_router(payments_router)
 app.include_router(upload_router)
 app.include_router(internal_router)
 app.include_router(notify_router)
 app.include_router(community_router)
-app.include_router(parking_router)
-app.include_router(parking_play_router)
-app.include_router(parking_popup_router)
 
-register_research_startup(app)
 register_rss_startup(app)
 
 from routers.community.logic import (
