@@ -31,7 +31,6 @@ from models import (
 import hashlib
 import jwt 
 from sqlalchemy import func ,select, or_, and_, text
-from google_play import get_service, PACKAGE_NAME
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import base64, json
 from googleapiclient.errors import HttpError
