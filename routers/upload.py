@@ -63,6 +63,7 @@ def upload_base64(payload: UploadBase64Request):
     with open(save_path, "wb") as f:
         f.write(image_bytes)
 
-    public_url = f"https://api.smartgauge.co.kr/static/{save_path.name}"
+    public_base_url = os.getenv("PUBLIC_BASE_URL", "https://api.daewon469.com").rstrip("/")
+    public_url = f"{public_base_url}/static/{save_path.name}"
     return {"url": public_url}
 
