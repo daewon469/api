@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from database import SessionLocal, engine
-from recode import ensure_recode_columns
+
 
 from .logic import _rollover_recruit_card_types
 
@@ -28,9 +28,6 @@ def ensure_schema() -> None:
     _ensure_community_posts_columns()
     _ensure_phone_table()
     _ensure_community_user_restrictions_table()
-
-    # 운행일지(recode) 관련 컬럼 보정
-    ensure_recode_columns()
 
 
 def _startup_enforce_recruit_card_limits() -> None:
