@@ -202,96 +202,163 @@ def get_source_scan_status(
 # 1-c) 자동 전체 마이그레이션 (목록조회 + 다운로드 일괄, 백그라운드)
 # ---------------------------------------------------------------------------
 
-def _do_auto_migration(overwrite: bool = False) -> None:
-    """백그라운드 스레드: A 파일 목록 → 순차 다운로드 → 완료."""
-    global _mig_state
+PAGE_SIZE = 6
 
-    # --- Phase 1: 파일 목록 조회 ---
+
+def _do_auto_migration(overwrite: bool = False) -> None:
+    """
+    백그라운드 스레드: A 서버에서 6개씩 페이지 조회 → 중복체크 → 즉시 다운로드.
+    전체 파일 목록을 한 번에 받지 않으므로 타임아웃이 발생하지 않습니다.
+    """
+    global _mig_state
+    from services.upload_migration_service import (
+        validate_relative_upload_path,
+        get_uploads_root_dir,
+        _build_headers,
+    )
+    from pathlib import Path
+
+    source_base = (settings.SMARTGAUGE_SOURCE_BASE_URL or "").strip().rstrip("/")
+    scan_prefix = "/admin/migration/uploads"
+    headers = _build_headers(settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN or "")
+    short_timeout = httpx.Timeout(connect=60.0, read=300.0, write=300.0, pool=300.0)
+    target_root = get_uploads_root_dir()
+
+    # --- Phase 1: A 서버 백그라운드 스캔 시작 + 대기 ---
     with _mig_lock:
         _mig_state["status"] = "scanning"
         _mig_state["current_file"] = None
 
-    print("[MIGRATION] Phase 1: A 서버 파일 목록 조회 시작…")
+    print("[MIGRATION] Phase 1: A 서버에 파일 스캔 요청…")
 
     try:
-        result = fetch_source_file_list(
-            source_base_url=settings.SMARTGAUGE_SOURCE_BASE_URL,
-            source_files_endpoint=settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT,
-            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
-            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
-            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
-        )
+        with httpx.Client(timeout=short_timeout, follow_redirects=True) as client:
+            # 스캔 시작
+            r = client.post(f"{source_base}{scan_prefix}/start-file-scan", headers=headers)
+            r.raise_for_status()
+            print("[MIGRATION] A 서버 스캔 시작됨, 완료 대기 중…")
+
+            # 폴링 대기 (3초 간격, 최대 10분)
+            total_files = 0
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                time.sleep(3)
+                r = client.get(f"{source_base}{scan_prefix}/file-scan-status", headers=headers)
+                r.raise_for_status()
+                status_data = r.json()
+                s = status_data.get("status")
+
+                if s == "done":
+                    total_files = status_data.get("total", 0)
+                    print(f"[MIGRATION] A 서버 스캔 완료: 전체 {total_files}개 파일")
+                    break
+                elif s == "error":
+                    raise RuntimeError(f"A 서버 스캔 실패: {status_data.get('error', 'unknown')}")
+            else:
+                raise RuntimeError("A 서버 스캔 10분 초과 타임아웃")
+
     except Exception as e:
         err_msg = str(e) or e.__class__.__name__
-        print(f"[MIGRATION] ❌ 파일 목록 조회 실패: {err_msg}")
+        print(f"[MIGRATION] ❌ A 서버 스캔 실패: {err_msg}")
         with _mig_lock:
             _mig_state["status"] = "error"
-            _mig_state["error"] = f"파일 목록 조회 실패: {err_msg}"
+            _mig_state["error"] = f"A 서버 스캔 실패: {err_msg}"
             _mig_state["finished_at"] = time.time()
         return
 
-    files = result.get("files") or []
-    total = len(files)
-    # pending = exists_on_b 가 False인 파일들
-    pending = [f for f in files if not f.get("exists_on_b")]
-    skipped_count = total - len(pending)
-
-    print(f"[MIGRATION] 파일 목록 조회 완료: 전체 {total}개, 이미 존재 {skipped_count}개, 이전 대상 {len(pending)}개")
-
     with _mig_lock:
-        _mig_state["total"] = total
-        _mig_state["skipped"] = skipped_count
-        _mig_state["downloaded"] = 0
-        _mig_state["failed"] = 0
-        _mig_state["failed_files"] = []
+        _mig_state["total"] = total_files
         _mig_state["status"] = "downloading"
 
-    if not pending:
-        print("[MIGRATION] ✅ 이전할 파일 없음 — 모두 존재합니다.")
+    if total_files == 0:
+        print("[MIGRATION] ✅ A 서버에 파일 없음.")
         with _mig_lock:
             _mig_state["status"] = "done"
             _mig_state["finished_at"] = time.time()
         return
 
-    # --- Phase 2: 순차 다운로드 ---
-    print(f"[MIGRATION] Phase 2: {len(pending)}개 파일 다운로드 시작…")
+    # --- Phase 2: 6개씩 페이지 조회 → 중복체크 → 즉시 다운로드 ---
+    print(f"[MIGRATION] Phase 2: {total_files}개 파일을 {PAGE_SIZE}개씩 조회+이전 시작…")
 
-    for i, finfo in enumerate(pending, 1):
-        rel_path = finfo.get("path", "")
+    offset = 0
+    file_num = 0
+
+    try:
+        with httpx.Client(timeout=short_timeout, follow_redirects=True) as client:
+            while offset < total_files:
+                # 페이지 조회
+                r = client.get(
+                    f"{source_base}{scan_prefix}/file-scan-page",
+                    params={"offset": offset, "limit": PAGE_SIZE},
+                    headers=headers,
+                )
+                r.raise_for_status()
+                page_data = r.json()
+                page_files = page_data.get("files") or []
+
+                if not page_files:
+                    break
+
+                for rel_path in page_files:
+                    if not isinstance(rel_path, str):
+                        continue
+                    file_num += 1
+
+                    # 중복 체크 (B 서버에 이미 존재?)
+                    try:
+                        validated = validate_relative_upload_path(rel_path)
+                        target_path = (target_root / validated).resolve()
+                        if target_path.exists() and not overwrite:
+                            print(f"[MIGRATION]  [{file_num}/{total_files}] ⏭ 이미 존재: {rel_path}")
+                            with _mig_lock:
+                                _mig_state["skipped"] += 1
+                            continue
+                    except Exception:
+                        pass  # 경로 검증 실패 시 다운로드 시도
+
+                    # 다운로드
+                    with _mig_lock:
+                        _mig_state["current_file"] = rel_path
+
+                    print(f"[MIGRATION]  [{file_num}/{total_files}] 다운로드: {rel_path}")
+
+                    try:
+                        dl_result = download_single_file(
+                            relative_path=rel_path,
+                            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+                            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+                            overwrite=overwrite,
+                            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+                        )
+                        action = dl_result.get("action", "")
+                        if action == "skipped":
+                            print(f"[MIGRATION]  [{file_num}/{total_files}] ⏭ 스킵: {rel_path}")
+                            with _mig_lock:
+                                _mig_state["skipped"] += 1
+                        elif action == "downloaded":
+                            print(f"[MIGRATION]  [{file_num}/{total_files}] ✅ 완료: {rel_path}")
+                            with _mig_lock:
+                                _mig_state["downloaded"] += 1
+                        else:
+                            reason = dl_result.get("reason", action)
+                            print(f"[MIGRATION]  [{file_num}/{total_files}] ❌ 실패: {rel_path} — {reason}")
+                            with _mig_lock:
+                                _mig_state["failed"] += 1
+                                _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
+                    except Exception as e:
+                        reason = str(e) or e.__class__.__name__
+                        print(f"[MIGRATION]  [{file_num}/{total_files}] ❌ 예외: {rel_path} — {reason}")
+                        with _mig_lock:
+                            _mig_state["failed"] += 1
+                            _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
+
+                offset += PAGE_SIZE
+
+    except Exception as e:
+        err_msg = str(e) or e.__class__.__name__
+        print(f"[MIGRATION] ❌ 페이지 조회 중 오류: {err_msg}")
         with _mig_lock:
-            _mig_state["current_file"] = rel_path
-
-        print(f"[MIGRATION]  [{i}/{len(pending)}] 다운로드: {rel_path}")
-
-        try:
-            dl_result = download_single_file(
-                relative_path=rel_path,
-                source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
-                migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
-                overwrite=overwrite,
-                timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
-            )
-            action = dl_result.get("action", "")
-            if action == "skipped":
-                print(f"[MIGRATION]  [{i}/{len(pending)}] ⏭ 스킵(이미 존재): {rel_path}")
-                with _mig_lock:
-                    _mig_state["skipped"] += 1
-            elif action == "downloaded":
-                print(f"[MIGRATION]  [{i}/{len(pending)}] ✅ 완료: {rel_path}")
-                with _mig_lock:
-                    _mig_state["downloaded"] += 1
-            else:
-                reason = dl_result.get("reason", action)
-                print(f"[MIGRATION]  [{i}/{len(pending)}] ❌ 실패: {rel_path} — {reason}")
-                with _mig_lock:
-                    _mig_state["failed"] += 1
-                    _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
-        except Exception as e:
-            reason = str(e) or e.__class__.__name__
-            print(f"[MIGRATION]  [{i}/{len(pending)}] ❌ 예외: {rel_path} — {reason}")
-            with _mig_lock:
-                _mig_state["failed"] += 1
-                _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
+            _mig_state["error"] = f"페이지 조회 중 오류: {err_msg}"
 
     with _mig_lock:
         _mig_state["status"] = "done"
@@ -302,7 +369,7 @@ def _do_auto_migration(overwrite: bool = False) -> None:
     sk = _mig_state["skipped"]
     fa = _mig_state["failed"]
     print(f"[MIGRATION] ========== 마이그레이션 완료 ==========")
-    print(f"[MIGRATION]   전체: {total}  다운로드: {dl}  스킵: {sk}  실패: {fa}")
+    print(f"[MIGRATION]   전체: {total_files}  다운로드: {dl}  스킵: {sk}  실패: {fa}")
     print(f"[MIGRATION] =======================================")
 
 
