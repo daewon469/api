@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time as _time
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import quote
@@ -108,43 +109,87 @@ def fetch_source_file_list(
     timeout_sec: float = 300.0,
 ) -> dict[str, Any]:
     """
-    A 서버의 파일목록 API를 호출하여 파일 경로 + B에 이미 존재 여부를 반환합니다.
+    A 서버의 파일목록을 조회하여 파일 경로 + B에 이미 존재 여부를 반환합니다.
+
+    우선 A 서버의 백그라운드 스캔 엔드포인트(start-file-scan / file-scan-status)를
+    사용하고, A 서버가 해당 엔드포인트를 지원하지 않으면 기존 동기 방식으로 폴백합니다.
     """
     source_base = (source_base_url or "").strip().rstrip("/")
-    files_ep = (source_files_endpoint or "").strip()
-    if not files_ep.startswith("/"):
-        files_ep = "/" + files_ep
-    list_url = f"{source_base}{files_ep}"
-
     headers = _build_headers(migration_token)
-    timeout = _build_timeout(timeout_sec)
+    short_timeout = _build_timeout(30.0)     # 개별 요청은 30초면 충분
+    long_timeout = _build_timeout(timeout_sec)
     target_root = get_uploads_root_dir()
 
-    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        try:
-            r = client.get(list_url, headers=headers)
-            r.raise_for_status()
-            payload = r.json()
-        except httpx.TimeoutException as e:
-            raise RuntimeError(f"source list fetch timeout: {list_url}") from e
-        except httpx.HTTPStatusError as e:
-            body = ""
-            try:
-                body = (e.response.text or "")[:500]
-            except Exception:
-                body = ""
-            raise RuntimeError(
-                f"source list fetch failed: HTTP {e.response.status_code} ({list_url}){(': ' + body) if body else ''}"
-            ) from e
-        except httpx.RequestError as e:
-            raise RuntimeError(f"source list fetch request error: {list_url} ({e.__class__.__name__})") from e
+    # ── 방법 1: A 서버 백그라운드 스캔 (폴링) ──
+    scan_prefix = "/admin/migration/uploads"
+    start_url = f"{source_base}{scan_prefix}/start-file-scan"
+    status_url = f"{source_base}{scan_prefix}/file-scan-status"
 
-    raw_files = payload.get("files") or []
+    payload: dict[str, Any] | None = None
+
+    try:
+        with httpx.Client(timeout=short_timeout, follow_redirects=True) as client:
+            # 1) 스캔 시작 요청
+            r = client.post(start_url, headers=headers)
+            r.raise_for_status()
+            logger.info("A 서버 백그라운드 스캔 시작 요청 성공")
+
+            # 2) 폴링 (3초 간격, 최대 10분)
+            deadline = _time.time() + 600  # 10분
+            while _time.time() < deadline:
+                _time.sleep(3)
+                r = client.get(status_url, headers=headers)
+                r.raise_for_status()
+                status_data = r.json()
+                s = status_data.get("status")
+
+                if s == "done":
+                    payload = status_data.get("result")
+                    logger.info("A 서버 백그라운드 스캔 완료")
+                    break
+                elif s == "error":
+                    err = status_data.get("error", "unknown")
+                    raise RuntimeError(f"A 서버 스캔 실패: {err}")
+                # scanning → 계속 폴링
+            else:
+                raise RuntimeError("A 서버 스캔 10분 초과 타임아웃")
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        # A 서버가 새 엔드포인트를 지원하지 않으면 기존 방식으로 폴백
+        logger.info("A 서버 백그라운드 스캔 불가(%s), 기존 동기 방식 시도", e.__class__.__name__)
+
+    # ── 방법 2: 기존 동기 방식 (폴백) ──
+    if payload is None:
+        files_ep = (source_files_endpoint or "").strip()
+        if not files_ep.startswith("/"):
+            files_ep = "/" + files_ep
+        list_url = f"{source_base}{files_ep}"
+
+        with httpx.Client(timeout=long_timeout, follow_redirects=True) as client:
+            try:
+                r = client.get(list_url, headers=headers)
+                r.raise_for_status()
+                payload = r.json()
+            except httpx.TimeoutException as e:
+                raise RuntimeError(f"source list fetch timeout: {list_url}") from e
+            except httpx.HTTPStatusError as e:
+                body = ""
+                try:
+                    body = (e.response.text or "")[:500]
+                except Exception:
+                    body = ""
+                raise RuntimeError(
+                    f"source list fetch failed: HTTP {e.response.status_code} ({list_url}){(': ' + body) if body else ''}"
+                ) from e
+            except httpx.RequestError as e:
+                raise RuntimeError(f"source list fetch request error: {list_url} ({e.__class__.__name__})") from e
+
+    # ── 결과 처리 ──
+    raw_files = (payload or {}).get("files") or []
     if not isinstance(raw_files, list):
         raise ValueError("invalid files payload")
 
     uploads_base = (
-        (payload.get("base_url") or "").strip().rstrip("/")
+        ((payload or {}).get("base_url") or "").strip().rstrip("/")
         or (source_uploads_base_url or "").strip().rstrip("/")
     )
 
@@ -164,7 +209,7 @@ def fetch_source_file_list(
     return {
         "count": len(result_files),
         "files": result_files,
-        "source_files_url": list_url,
+        "source_files_url": f"{source_base}/...",
         "uploads_base_url": uploads_base,
     }
 
