@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import socket
+import threading
 import time
+from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Body, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException
 from pydantic import BaseModel, Field
 import httpx
 
@@ -17,6 +19,18 @@ from services.upload_migration_service import (
 
 
 router = APIRouter(prefix="/admin/migration/uploads", tags=["admin-migration"])
+
+# ---------------------------------------------------------------------------
+# 백그라운드 스캔 상태 (in-memory singleton)
+# ---------------------------------------------------------------------------
+_scan_lock = threading.Lock()
+_scan_state: dict[str, Any] = {
+    "status": "idle",   # idle | scanning | done | error
+    "result": None,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
 
 
 class PullUploadsRequest(BaseModel):
@@ -78,6 +92,93 @@ def list_source_files(
             status_code=504 if "timeout" in msg.lower() else 502,
             detail={"error": e.__class__.__name__, "message": msg},
         ) from e
+
+
+# ---------------------------------------------------------------------------
+# 1-b) 백그라운드 스캔 시작 + 상태 조회 (504 방지)
+# ---------------------------------------------------------------------------
+
+def _do_background_scan() -> None:
+    """백그라운드 스레드에서 실행되는 스캔 작업."""
+    global _scan_state
+    try:
+        result = fetch_source_file_list(
+            source_base_url=settings.SMARTGAUGE_SOURCE_BASE_URL,
+            source_files_endpoint=settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT,
+            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+        )
+        with _scan_lock:
+            _scan_state["status"] = "done"
+            _scan_state["result"] = result
+            _scan_state["error"] = None
+            _scan_state["finished_at"] = time.time()
+    except Exception as e:
+        with _scan_lock:
+            _scan_state["status"] = "error"
+            _scan_state["result"] = None
+            _scan_state["error"] = str(e) or e.__class__.__name__
+            _scan_state["finished_at"] = time.time()
+
+
+@router.post("/start-source-scan")
+def start_source_scan(
+    background_tasks: BackgroundTasks,
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    A 서버 파일 목록 스캔을 백그라운드로 시작합니다.
+    - 이미 스캔 중이면 현재 상태만 반환합니다.
+    - 완료/에러 후 재호출하면 새 스캔을 시작합니다.
+    """
+    _check_migration_token(x_migration_token)
+
+    with _scan_lock:
+        if _scan_state["status"] == "scanning":
+            return {
+                "status": "scanning",
+                "message": "이미 스캔이 진행 중입니다.",
+                "started_at": _scan_state["started_at"],
+            }
+
+        _scan_state["status"] = "scanning"
+        _scan_state["result"] = None
+        _scan_state["error"] = None
+        _scan_state["started_at"] = time.time()
+        _scan_state["finished_at"] = None
+
+    background_tasks.add_task(_do_background_scan)
+    return {
+        "status": "scanning",
+        "message": "스캔을 시작했습니다.",
+        "started_at": _scan_state["started_at"],
+    }
+
+
+@router.get("/source-files-status")
+def get_source_scan_status(
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    백그라운드 스캔의 현재 상태를 반환합니다.
+    - status: idle | scanning | done | error
+    - done일 때 result에 파일 목록이 포함됩니다.
+    """
+    _check_migration_token(x_migration_token)
+
+    with _scan_lock:
+        state_copy = {
+            "status": _scan_state["status"],
+            "started_at": _scan_state["started_at"],
+            "finished_at": _scan_state["finished_at"],
+        }
+        if _scan_state["status"] == "done":
+            state_copy["result"] = _scan_state["result"]
+        elif _scan_state["status"] == "error":
+            state_copy["error"] = _scan_state["error"]
+
+    return state_copy
 
 
 # ---------------------------------------------------------------------------
