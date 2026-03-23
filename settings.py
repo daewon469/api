@@ -21,3 +21,21 @@ SMART_KAKAO_KEY = os.getenv("SMART_KAKAO_KEY", "").strip()
 KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY", "").strip() or SMART_KAKAO_KEY
 KAKAO_MOBILITY_API_KEY = os.getenv("KAKAO_MOBILITY_API_KEY", "").strip() or KAKAO_REST_API_KEY
 
+# -------------------- One-shot migration (uploads) --------------------
+# B 서버: 마이그레이션 API 보호용(선택)
+MIGRATION_TOKEN = os.getenv("MIGRATION_TOKEN", "").strip()
+
+# A 서버 정보 (smartgauge)
+SMARTGAUGE_SOURCE_BASE_URL = os.getenv("SMARTGAUGE_SOURCE_BASE_URL", "https://api.smartgauge.co.kr").strip().rstrip("/")
+SMARTGAUGE_SOURCE_FILES_ENDPOINT = os.getenv(
+    "SMARTGAUGE_SOURCE_FILES_ENDPOINT", "/admin/migration/uploads/files"
+).strip()
+SMARTGAUGE_SOURCE_UPLOADS_BASE_URL = os.getenv(
+    "SMARTGAUGE_SOURCE_UPLOADS_BASE_URL", "https://api.smartgauge.co.kr/uploads"
+).strip().rstrip("/")
+
+# A 서버 파일목록 API가 토큰을 요구할 경우 사용(선택)
+SMARTGAUGE_SOURCE_MIGRATION_TOKEN = os.getenv("SMARTGAUGE_SOURCE_MIGRATION_TOKEN", "").strip()
+
+# 다운로드 timeout (초)
+SMARTGAUGE_HTTP_TIMEOUT_SEC = float(os.getenv("SMARTGAUGE_HTTP_TIMEOUT_SEC", "60").strip() or "60")

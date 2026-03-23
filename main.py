@@ -60,6 +60,7 @@ from routers.notify import create_notification, get_user_id_by_username, router 
 from routers.payments import router as payments_router
 from routers.upload import mount_static, router as upload_router
 from routers.community import router as community_router
+from routers.admin_migration_uploads import router as admin_migration_uploads_router
 
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
@@ -81,6 +82,7 @@ app.include_router(upload_router)
 app.include_router(internal_router)
 app.include_router(notify_router)
 app.include_router(community_router)
+app.include_router(admin_migration_uploads_router)
 
 register_rss_startup(app)
 
