@@ -32,6 +32,23 @@ _scan_state: dict[str, Any] = {
     "finished_at": None,
 }
 
+# ---------------------------------------------------------------------------
+# 백그라운드 자동 마이그레이션 상태
+# ---------------------------------------------------------------------------
+_mig_lock = threading.Lock()
+_mig_state: dict[str, Any] = {
+    "status": "idle",       # idle | scanning | downloading | done | error
+    "total": 0,
+    "downloaded": 0,
+    "skipped": 0,
+    "failed": 0,
+    "current_file": None,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+    "failed_files": [],
+}
+
 
 class PullUploadsRequest(BaseModel):
     overwrite: bool = Field(default=False)
@@ -179,6 +196,181 @@ def get_source_scan_status(
             state_copy["error"] = _scan_state["error"]
 
     return state_copy
+
+
+# ---------------------------------------------------------------------------
+# 1-c) 자동 전체 마이그레이션 (목록조회 + 다운로드 일괄, 백그라운드)
+# ---------------------------------------------------------------------------
+
+def _do_auto_migration(overwrite: bool = False) -> None:
+    """백그라운드 스레드: A 파일 목록 → 순차 다운로드 → 완료."""
+    global _mig_state
+
+    # --- Phase 1: 파일 목록 조회 ---
+    with _mig_lock:
+        _mig_state["status"] = "scanning"
+        _mig_state["current_file"] = None
+
+    print("[MIGRATION] Phase 1: A 서버 파일 목록 조회 시작…")
+
+    try:
+        result = fetch_source_file_list(
+            source_base_url=settings.SMARTGAUGE_SOURCE_BASE_URL,
+            source_files_endpoint=settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT,
+            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+        )
+    except Exception as e:
+        err_msg = str(e) or e.__class__.__name__
+        print(f"[MIGRATION] ❌ 파일 목록 조회 실패: {err_msg}")
+        with _mig_lock:
+            _mig_state["status"] = "error"
+            _mig_state["error"] = f"파일 목록 조회 실패: {err_msg}"
+            _mig_state["finished_at"] = time.time()
+        return
+
+    files = result.get("files") or []
+    total = len(files)
+    # pending = exists_on_b 가 False인 파일들
+    pending = [f for f in files if not f.get("exists_on_b")]
+    skipped_count = total - len(pending)
+
+    print(f"[MIGRATION] 파일 목록 조회 완료: 전체 {total}개, 이미 존재 {skipped_count}개, 이전 대상 {len(pending)}개")
+
+    with _mig_lock:
+        _mig_state["total"] = total
+        _mig_state["skipped"] = skipped_count
+        _mig_state["downloaded"] = 0
+        _mig_state["failed"] = 0
+        _mig_state["failed_files"] = []
+        _mig_state["status"] = "downloading"
+
+    if not pending:
+        print("[MIGRATION] ✅ 이전할 파일 없음 — 모두 존재합니다.")
+        with _mig_lock:
+            _mig_state["status"] = "done"
+            _mig_state["finished_at"] = time.time()
+        return
+
+    # --- Phase 2: 순차 다운로드 ---
+    print(f"[MIGRATION] Phase 2: {len(pending)}개 파일 다운로드 시작…")
+
+    for i, finfo in enumerate(pending, 1):
+        rel_path = finfo.get("path", "")
+        with _mig_lock:
+            _mig_state["current_file"] = rel_path
+
+        print(f"[MIGRATION]  [{i}/{len(pending)}] 다운로드: {rel_path}")
+
+        try:
+            dl_result = download_single_file(
+                relative_path=rel_path,
+                source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+                migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+                overwrite=overwrite,
+                timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+            )
+            action = dl_result.get("action", "")
+            if action == "skipped":
+                print(f"[MIGRATION]  [{i}/{len(pending)}] ⏭ 스킵(이미 존재): {rel_path}")
+                with _mig_lock:
+                    _mig_state["skipped"] += 1
+            elif action == "downloaded":
+                print(f"[MIGRATION]  [{i}/{len(pending)}] ✅ 완료: {rel_path}")
+                with _mig_lock:
+                    _mig_state["downloaded"] += 1
+            else:
+                reason = dl_result.get("reason", action)
+                print(f"[MIGRATION]  [{i}/{len(pending)}] ❌ 실패: {rel_path} — {reason}")
+                with _mig_lock:
+                    _mig_state["failed"] += 1
+                    _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
+        except Exception as e:
+            reason = str(e) or e.__class__.__name__
+            print(f"[MIGRATION]  [{i}/{len(pending)}] ❌ 예외: {rel_path} — {reason}")
+            with _mig_lock:
+                _mig_state["failed"] += 1
+                _mig_state["failed_files"].append({"path": rel_path, "reason": reason})
+
+    with _mig_lock:
+        _mig_state["status"] = "done"
+        _mig_state["current_file"] = None
+        _mig_state["finished_at"] = time.time()
+
+    dl = _mig_state["downloaded"]
+    sk = _mig_state["skipped"]
+    fa = _mig_state["failed"]
+    print(f"[MIGRATION] ========== 마이그레이션 완료 ==========")
+    print(f"[MIGRATION]   전체: {total}  다운로드: {dl}  스킵: {sk}  실패: {fa}")
+    print(f"[MIGRATION] =======================================")
+
+
+@router.post("/start-auto-migration")
+def start_auto_migration(
+    background_tasks: BackgroundTasks,
+    overwrite: bool = False,
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    A→B 전체 자동 마이그레이션을 백그라운드로 시작합니다.
+    - 파일 목록 조회 → 미존재 파일 순차 다운로드
+    - 진행 상태는 GET /auto-migration-status 로 폴링
+    """
+    _check_migration_token(x_migration_token)
+
+    with _mig_lock:
+        if _mig_state["status"] in ("scanning", "downloading"):
+            return {
+                "status": _mig_state["status"],
+                "message": "이미 마이그레이션이 진행 중입니다.",
+                "started_at": _mig_state["started_at"],
+            }
+
+        _mig_state.update({
+            "status": "scanning",
+            "total": 0,
+            "downloaded": 0,
+            "skipped": 0,
+            "failed": 0,
+            "current_file": None,
+            "error": None,
+            "started_at": time.time(),
+            "finished_at": None,
+            "failed_files": [],
+        })
+
+    background_tasks.add_task(_do_auto_migration, overwrite)
+    return {
+        "status": "scanning",
+        "message": "마이그레이션을 시작했습니다. GET /auto-migration-status 로 상태를 확인하세요.",
+        "started_at": _mig_state["started_at"],
+    }
+
+
+@router.get("/auto-migration-status")
+def get_auto_migration_status(
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    자동 마이그레이션 진행 상태를 반환합니다.
+    응답은 가볍게(파일 목록 없이) 유지하여 타임아웃을 방지합니다.
+    """
+    _check_migration_token(x_migration_token)
+
+    with _mig_lock:
+        return {
+            "status": _mig_state["status"],
+            "total": _mig_state["total"],
+            "downloaded": _mig_state["downloaded"],
+            "skipped": _mig_state["skipped"],
+            "failed": _mig_state["failed"],
+            "current_file": _mig_state["current_file"],
+            "error": _mig_state["error"],
+            "started_at": _mig_state["started_at"],
+            "finished_at": _mig_state["finished_at"],
+            "failed_count": len(_mig_state["failed_files"]),
+        }
 
 
 # ---------------------------------------------------------------------------
