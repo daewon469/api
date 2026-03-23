@@ -9,7 +9,11 @@ from pydantic import BaseModel, Field
 import httpx
 
 import settings
-from services.upload_migration_service import migrate_uploads_from_source
+from services.upload_migration_service import (
+    migrate_uploads_from_source,
+    fetch_source_file_list,
+    download_single_file,
+)
 
 
 router = APIRouter(prefix="/admin/migration/uploads", tags=["admin-migration"])
@@ -20,6 +24,97 @@ class PullUploadsRequest(BaseModel):
     limit: int | None = Field(default=None, ge=1)
     dry_run: bool = Field(default=False)
 
+
+class PullSingleRequest(BaseModel):
+    path: str = Field(..., description="A 서버 기준 상대 파일 경로")
+    overwrite: bool = Field(default=False)
+
+
+# ---------------------------------------------------------------------------
+# 헬퍼
+# ---------------------------------------------------------------------------
+
+def _check_migration_token(x_migration_token: str | None) -> None:
+    token = (getattr(settings, "MIGRATION_TOKEN", "") or "").strip()
+    if token and x_migration_token != token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _source_files_url() -> str:
+    source_base = (settings.SMARTGAUGE_SOURCE_BASE_URL or "").rstrip("/")
+    files_ep = (settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT or "").strip()
+    if files_ep and not files_ep.startswith("/"):
+        files_ep = "/" + files_ep
+    return f"{source_base}{files_ep}"
+
+
+# ---------------------------------------------------------------------------
+# 1) 파일 목록 조회 (A -> B 비교)
+# ---------------------------------------------------------------------------
+
+@router.get("/source-files")
+def list_source_files(
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    (임시) A 서버의 업로드 파일 목록을 조회하고,
+    각 파일이 B 서버에 이미 존재하는지 여부를 함께 반환합니다.
+    """
+    _check_migration_token(x_migration_token)
+
+    try:
+        return fetch_source_file_list(
+            source_base_url=settings.SMARTGAUGE_SOURCE_BASE_URL,
+            source_files_endpoint=settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT,
+            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+        )
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail={"error": "timeout", "message": str(e)}) from e
+    except (ValueError, RuntimeError) as e:
+        msg = str(e) or e.__class__.__name__
+        raise HTTPException(
+            status_code=504 if "timeout" in msg.lower() else 502,
+            detail={"error": e.__class__.__name__, "message": msg},
+        ) from e
+
+
+# ---------------------------------------------------------------------------
+# 2) 단일 파일 이전
+# ---------------------------------------------------------------------------
+
+@router.post("/pull-single")
+def pull_single_file(
+    payload: PullSingleRequest = Body(...),
+    x_migration_token: str | None = Header(default=None),
+):
+    """
+    (임시) A 서버에서 파일 1개를 다운로드하여 B 서버 /data/uploads 에 저장합니다.
+    - 요청 1건 = 파일 1개이므로 타임아웃 위험이 거의 없습니다.
+    """
+    _check_migration_token(x_migration_token)
+
+    try:
+        return download_single_file(
+            relative_path=payload.path,
+            source_uploads_base_url=settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
+            migration_token=settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN,
+            overwrite=payload.overwrite,
+            timeout_sec=settings.SMARTGAUGE_HTTP_TIMEOUT_SEC,
+        )
+    except httpx.TimeoutException as e:
+        raise HTTPException(status_code=504, detail={"error": "timeout", "message": str(e), "path": payload.path}) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"error": "invalid_path", "message": str(e), "path": payload.path}) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail={"error": e.__class__.__name__, "message": str(e), "path": payload.path}) from e
+
+
+# ---------------------------------------------------------------------------
+# 3) 진단
+# ---------------------------------------------------------------------------
+
 @router.get("/diagnose-source")
 def diagnose_source(timeout_sec: float = 5.0):
     """
@@ -29,10 +124,7 @@ def diagnose_source(timeout_sec: float = 5.0):
     - A 파일목록 API 요청 시도
     """
     source_base = (settings.SMARTGAUGE_SOURCE_BASE_URL or "").rstrip("/")
-    files_ep = (settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT or "").strip()
-    if files_ep and not files_ep.startswith("/"):
-        files_ep = "/" + files_ep
-    source_files_url = f"{source_base}{files_ep}"
+    source_files_url = _source_files_url()
 
     # DNS 진단
     parsed = urlparse(source_base)
@@ -50,7 +142,7 @@ def diagnose_source(timeout_sec: float = 5.0):
     headers: dict[str, str] = {}
     token = (settings.SMARTGAUGE_SOURCE_MIGRATION_TOKEN or "").strip()
     if token:
-        headers["x_migration_token"] = token
+        headers["x-migration-token"] = token  # 하이픈 사용
 
     # HTTP 진단(짧은 timeout)
     t = max(0.1, float(timeout_sec))
@@ -92,6 +184,10 @@ def diagnose_source(timeout_sec: float = 5.0):
     return result
 
 
+# ---------------------------------------------------------------------------
+# 4) 기존 일괄 마이그레이션 (유지)
+# ---------------------------------------------------------------------------
+
 @router.post("/pull-from-smartgauge")
 def pull_from_smartgauge(
     payload: PullUploadsRequest = Body(default=PullUploadsRequest()),
@@ -106,15 +202,9 @@ def pull_from_smartgauge(
     보안:
     - 환경변수 MIGRATION_TOKEN이 설정된 경우, 요청 헤더 x_migration_token 값이 일치해야 합니다.
     """
-    token = (getattr(settings, "MIGRATION_TOKEN", "") or "").strip()
-    if token and x_migration_token != token:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    _check_migration_token(x_migration_token)
 
-    source_base = (settings.SMARTGAUGE_SOURCE_BASE_URL or "").rstrip("/")
-    files_ep = (settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT or "").strip()
-    if files_ep and not files_ep.startswith("/"):
-        files_ep = "/" + files_ep
-    source_files_url = f"{source_base}{files_ep}"
+    source_files_url = _source_files_url()
 
     try:
         return migrate_uploads_from_source(

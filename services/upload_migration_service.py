@@ -11,10 +11,34 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# 공통 헬퍼
+# ---------------------------------------------------------------------------
 
 def get_uploads_root_dir() -> Path:
     # 프로젝트 기존 업로드/정적 파일 루트는 STATIC_DIR(/data/uploads) 사용
     return Path(os.getenv("STATIC_DIR", "/data/uploads")).resolve()
+
+
+def _build_headers(migration_token: str = "") -> dict[str, str]:
+    """A 서버 호출 시 사용하는 공통 헤더(토큰 포함)."""
+    headers: dict[str, str] = {}
+    token = (migration_token or "").strip()
+    if token:
+        # FastAPI Header()는 파이썬 이름의 밑줄(_)을 하이픈(-)으로 변환하므로
+        # 실제 HTTP 헤더는 하이픈을 사용해야 A가 올바르게 수신합니다.
+        headers["x-migration-token"] = token
+    return headers
+
+
+def _build_timeout(timeout_sec: float = 300.0) -> httpx.Timeout:
+    """connect는 30초, read/write/pool은 timeout_sec 으로 분리."""
+    return httpx.Timeout(
+        connect=30.0,
+        read=float(timeout_sec),
+        write=float(timeout_sec),
+        pool=float(timeout_sec),
+    )
 
 
 def validate_relative_upload_path(path_str: str) -> str:
@@ -71,6 +95,125 @@ def save_stream_to_target(target_path: Path, stream_response: httpx.Response) ->
                 f.write(chunk)
 
 
+# ---------------------------------------------------------------------------
+# 신규: A 서버 파일 목록 조회 (B에 존재 여부 포함)
+# ---------------------------------------------------------------------------
+
+def fetch_source_file_list(
+    *,
+    source_base_url: str,
+    source_files_endpoint: str,
+    source_uploads_base_url: str,
+    migration_token: str = "",
+    timeout_sec: float = 300.0,
+) -> dict[str, Any]:
+    """
+    A 서버의 파일목록 API를 호출하여 파일 경로 + B에 이미 존재 여부를 반환합니다.
+    """
+    source_base = (source_base_url or "").strip().rstrip("/")
+    files_ep = (source_files_endpoint or "").strip()
+    if not files_ep.startswith("/"):
+        files_ep = "/" + files_ep
+    list_url = f"{source_base}{files_ep}"
+
+    headers = _build_headers(migration_token)
+    timeout = _build_timeout(timeout_sec)
+    target_root = get_uploads_root_dir()
+
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        try:
+            r = client.get(list_url, headers=headers)
+            r.raise_for_status()
+            payload = r.json()
+        except httpx.TimeoutException as e:
+            raise RuntimeError(f"source list fetch timeout: {list_url}") from e
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = (e.response.text or "")[:500]
+            except Exception:
+                body = ""
+            raise RuntimeError(
+                f"source list fetch failed: HTTP {e.response.status_code} ({list_url}){(': ' + body) if body else ''}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"source list fetch request error: {list_url} ({e.__class__.__name__})") from e
+
+    raw_files = payload.get("files") or []
+    if not isinstance(raw_files, list):
+        raise ValueError("invalid files payload")
+
+    uploads_base = (
+        (payload.get("base_url") or "").strip().rstrip("/")
+        or (source_uploads_base_url or "").strip().rstrip("/")
+    )
+
+    result_files: list[dict[str, Any]] = []
+    for raw_path in raw_files:
+        if not isinstance(raw_path, str):
+            continue
+        try:
+            rel = validate_relative_upload_path(raw_path)
+            target_path = _ensure_target_path_under_root(target_root, rel)
+            exists = target_path.exists()
+        except Exception:
+            exists = False
+            rel = raw_path
+        result_files.append({"path": rel, "exists_on_b": exists})
+
+    return {
+        "count": len(result_files),
+        "files": result_files,
+        "source_files_url": list_url,
+        "uploads_base_url": uploads_base,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 신규: 단일 파일 다운로드
+# ---------------------------------------------------------------------------
+
+def download_single_file(
+    *,
+    relative_path: str,
+    source_uploads_base_url: str,
+    migration_token: str = "",
+    overwrite: bool = False,
+    timeout_sec: float = 300.0,
+) -> dict[str, Any]:
+    """
+    A 서버에서 파일 1개를 다운로드하여 B 서버 /data/uploads 에 저장합니다.
+    """
+    rel = validate_relative_upload_path(relative_path)
+    target_root = get_uploads_root_dir()
+    target_path = _ensure_target_path_under_root(target_root, rel)
+
+    if target_path.exists() and not overwrite:
+        return {"success": True, "path": rel, "action": "skipped", "reason": "already exists"}
+
+    src_url = build_source_file_url(source_uploads_base_url, rel)
+    headers = _build_headers(migration_token)
+    timeout = _build_timeout(timeout_sec)
+
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        with client.stream("GET", src_url, headers=headers) as resp:
+            if resp.status_code != 200:
+                return {
+                    "success": False,
+                    "path": rel,
+                    "action": "failed",
+                    "reason": f"HTTP {resp.status_code}",
+                    "source_url": src_url,
+                }
+            save_stream_to_target(target_path, resp)
+
+    return {"success": True, "path": rel, "action": "downloaded"}
+
+
+# ---------------------------------------------------------------------------
+# 기존: 전체 일괄 마이그레이션 (유지)
+# ---------------------------------------------------------------------------
+
 def migrate_uploads_from_source(
     *,
     source_base_url: str,
@@ -94,20 +237,8 @@ def migrate_uploads_from_source(
         files_ep = "/" + files_ep
     list_url = f"{source_base}{files_ep}"
 
-    token = (migration_token or "").strip()
-    headers: dict[str, str] = {}
-    if token:
-        headers["x_migration_token"] = token
-
-    # 요청하신대로 timeout을 매우 크게(예: 1년) 늘릴 수 있도록,
-    # connect/read/write/pool 모두 동일한 timeout_sec를 적용합니다.
-    timeout = httpx.Timeout(
-        timeout=timeout_sec,
-        connect=float(timeout_sec),
-        read=float(timeout_sec),
-        write=float(timeout_sec),
-        pool=float(timeout_sec),
-    )
+    headers = _build_headers(migration_token)
+    timeout = _build_timeout(timeout_sec)
     target_root = get_uploads_root_dir()
 
     total = 0
