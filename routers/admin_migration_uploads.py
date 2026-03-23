@@ -137,10 +137,11 @@ def pull_from_smartgauge(
             },
         ) from e
     except (ValueError, RuntimeError) as e:
-        # 소스 목록 실패/파싱 실패 등을 502로 노출 (500으로 죽지 않게)
+        # 소스 목록 실패/파싱 실패 등을 5xx로 노출 (500으로 죽지 않게)
         msg = str(e) or e.__class__.__name__
+        is_timeout = "timeout" in msg.lower()
         raise HTTPException(
-            status_code=502,
+            status_code=504 if is_timeout else 502,
             detail={
                 "error": e.__class__.__name__,
                 "message": msg,
@@ -148,7 +149,7 @@ def pull_from_smartgauge(
                 "source_files_endpoint": settings.SMARTGAUGE_SOURCE_FILES_ENDPOINT,
                 "source_files_url": source_files_url,
                 "source_uploads_base_url": settings.SMARTGAUGE_SOURCE_UPLOADS_BASE_URL,
-                "hint": "B 서버에서 A로 HTTPS(443) 아웃바운드가 가능한지 확인하고, SMARTGAUGE_SOURCE_FILES_ENDPOINT가 '/admin/migration/uploads/files'인지 확인하세요.",
+                "hint": "B 서버에서 A로 HTTPS(443) 아웃바운드가 가능한지 확인하고, SMARTGAUGE_SOURCE_FILES_ENDPOINT가 '/admin/migration/uploads/files'인지 확인하세요. 빠른 진단: GET /admin/migration/uploads/diagnose-source",
             },
         ) from e
 
