@@ -99,7 +99,15 @@ def migrate_uploads_from_source(
     if token:
         headers["x_migration_token"] = token
 
-    timeout = httpx.Timeout(timeout_sec, connect=10.0)
+    # 요청하신대로 timeout을 매우 크게(예: 1년) 늘릴 수 있도록,
+    # connect/read/write/pool 모두 동일한 timeout_sec를 적용합니다.
+    timeout = httpx.Timeout(
+        timeout=timeout_sec,
+        connect=float(timeout_sec),
+        read=float(timeout_sec),
+        write=float(timeout_sec),
+        pool=float(timeout_sec),
+    )
     target_root = get_uploads_root_dir()
 
     total = 0
@@ -110,9 +118,23 @@ def migrate_uploads_from_source(
 
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
         # 1) A 서버 파일 목록 API 호출
-        r = client.get(list_url, headers=headers)
-        r.raise_for_status()
-        payload = r.json()
+        try:
+            r = client.get(list_url, headers=headers)
+            r.raise_for_status()
+            payload = r.json()
+        except httpx.TimeoutException as e:
+            raise RuntimeError(f"source list fetch timeout: {list_url}") from e
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = (e.response.text or "")[:500]
+            except Exception:
+                body = ""
+            raise RuntimeError(
+                f"source list fetch failed: HTTP {e.response.status_code} ({list_url}){(': ' + body) if body else ''}"
+            ) from e
+        except httpx.RequestError as e:
+            raise RuntimeError(f"source list fetch request error: {list_url} ({e.__class__.__name__})") from e
 
         files = payload.get("files") or []
         if not isinstance(files, list):
