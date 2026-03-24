@@ -565,22 +565,24 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(post)
 
-    # 글 등록 푸쉬 알림(관리자 대상) - 실패해도 글 등록 성공 처리
-    try:
-        notify_admin_acknowledged_post(
-            db,
-            post_id=int(post.id),
-            post_type=1,
-            author_username=username,
-            post_title=post.title,
-            exclude_user_id=int(userId),
-        )
-    except Exception as e:
+    # 글 등록 푸쉬 알림(관리자 대상) - 게시 상태일 때만 전송
+    # 임시저장(closed)은 알림을 보내지 않아 응답 지연/타임아웃을 줄입니다.
+    if str(getattr(post, "status", "") or "") == "published":
         try:
-            db.rollback()
-        except Exception:
-            pass
-        print("[WARN] notify_admin_acknowledged_post failed:", e)
+            notify_admin_acknowledged_post(
+                db,
+                post_id=int(post.id),
+                post_type=1,
+                author_username=username,
+                post_title=post.title,
+                exclude_user_id=int(userId),
+            )
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print("[WARN] notify_admin_acknowledged_post failed:", e)
 
     return PostOut(
         id=post.id,
@@ -779,43 +781,45 @@ def create_post_plus(post_type: int, username: str, body: PostCreate, db: Sessio
     db.commit()
     db.refresh(post)
 
-    # 글 등록 푸쉬 알림 - 실패해도 글 등록 성공 처리
-    try:
-        if int(post_type) in (1, 3, 4, 6):
-            notify_admin_acknowledged_post(
-                db,
-                post_id=int(post.id),
-                post_type=int(post_type),
-                author_username=username,
-                post_title=post.title,
-                exclude_user_id=int(userId),
-                # 문의글(post_type=6)은 owner도 함께 수신하도록 확장(관리자 기준 보완)
-                include_owners=(int(post_type) == 6),
-            )
-        elif int(post_type) == 7:
-            # 대행문의(post_type=7): 오너에게만 알림/푸쉬
-            notify_owners_post(
-                db,
-                post_id=int(post.id),
-                post_type=int(post_type),
-                author_username=username,
-                post_title=post.title,
-                exclude_user_id=int(userId),
-            )
-        elif int(post_type) == 5:
-            notify_all_push_post(
-                db,
-                post_id=int(post.id),
-                post_type=int(post_type),
-                author_username=username,
-                post_title=post.title,
-            )
-    except Exception as e:
+    # 글 등록 푸쉬 알림 - 게시 상태일 때만 전송
+    # 임시저장(closed)은 알림을 보내지 않아 응답 지연/타임아웃을 줄입니다.
+    if str(getattr(post, "status", "") or "") == "published":
         try:
-            db.rollback()
-        except Exception:
-            pass
-        print("[WARN] post notify(push) failed:", e)
+            if int(post_type) in (1, 3, 4, 6):
+                notify_admin_acknowledged_post(
+                    db,
+                    post_id=int(post.id),
+                    post_type=int(post_type),
+                    author_username=username,
+                    post_title=post.title,
+                    exclude_user_id=int(userId),
+                    # 문의글(post_type=6)은 owner도 함께 수신하도록 확장(관리자 기준 보완)
+                    include_owners=(int(post_type) == 6),
+                )
+            elif int(post_type) == 7:
+                # 대행문의(post_type=7): 오너에게만 알림/푸쉬
+                notify_owners_post(
+                    db,
+                    post_id=int(post.id),
+                    post_type=int(post_type),
+                    author_username=username,
+                    post_title=post.title,
+                    exclude_user_id=int(userId),
+                )
+            elif int(post_type) == 5:
+                notify_all_push_post(
+                    db,
+                    post_id=int(post.id),
+                    post_type=int(post_type),
+                    author_username=username,
+                    post_title=post.title,
+                )
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print("[WARN] post notify(push) failed:", e)
 
     return PostOut(
         id=post.id,
