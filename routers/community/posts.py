@@ -901,7 +901,7 @@ class PostsOut2(BaseModel):
 def list_posts_custom_by_user_settings(
     username: Optional[str] = Query(None, description="맞춤조건/좋아요 계산용 유저명"),
     cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
-    limit: int = Query(100, ge=1, le=100),
+    limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     db: Session = Depends(get_db),
 ):
@@ -1022,7 +1022,7 @@ def list_posts_custom_by_user_settings(
 def list_posts(
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명"),
     cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
-    limit: int = Query(100, ge=1, le=100),
+    limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
     province: Optional[str] = Query(None, description="지역 필터: 시/도"),
@@ -1175,7 +1175,7 @@ def search_posts_by_title(
     post_type: int = Query(1, description="게시글 타입(기본: 1=현장/구인글)"),
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명(선택)"),
     cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query("published", description="published | closed (선택)"),
     db: Session = Depends(get_db),
 ):
@@ -1301,7 +1301,7 @@ def list_posts_plus(
     post_type: int,
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명"),
     cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
-    limit: int = Query(100, ge=1, le=100),
+    limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
     province: Optional[str] = Query(None, description="지역 필터: 시/도"),
