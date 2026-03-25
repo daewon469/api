@@ -109,6 +109,35 @@ def province_candidates(prov: str) -> list[str]:
     return [p, full] if full and full != p else [p]
 
 
+def _parse_post_cursor_or_400(cursor: str) -> tuple[datetime, int]:
+    raw = (cursor or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="invalid cursor format")
+    try:
+        dt_str, id_str = raw.split("__", 1)
+        cur_dt = datetime.fromisoformat(dt_str)
+        cur_id = int(id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid cursor format")
+    return cur_dt, cur_id
+
+
+def _make_post_cursor(created_at: datetime, post_id: int) -> str:
+    return f"{created_at.isoformat()}__{int(post_id)}"
+
+
+def _apply_post_cursor_filter(q, cur_dt: datetime, cur_id: int):
+    return q.filter(
+        or_(
+            Community_Post.created_at < cur_dt,
+            and_(
+                Community_Post.created_at == cur_dt,
+                Community_Post.id < cur_id,
+            ),
+        )
+    )
+
+
 StatusLiteral = Literal["published", "closed"]
 
 
@@ -900,7 +929,7 @@ class PostsOut2(BaseModel):
 @app.get("/community/posts/custom", response_model=PostsOut2)
 def list_posts_custom_by_user_settings(
     username: Optional[str] = Query(None, description="맞춤조건/좋아요 계산용 유저명"),
-    cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
+    cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     db: Session = Depends(get_db),
@@ -924,7 +953,9 @@ def list_posts_custom_by_user_settings(
     if not user:
         return PostsOut2(items=[], next_cursor=None)
 
-    q = db.query(Community_Post).filter(Community_Post.post_type == 1).order_by(Community_Post.created_at.desc())
+    q = db.query(Community_Post).filter(Community_Post.post_type == 1).order_by(
+        Community_Post.created_at.desc(), Community_Post.id.desc()
+    )
 
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
@@ -990,13 +1021,12 @@ def list_posts_custom_by_user_settings(
             q = q.filter(or_(*role_conds))
 
     if cursor:
-        try:
-            cur_dt = datetime.fromisoformat(cursor)
-            q = q.filter(Community_Post.created_at < cur_dt)
-        except Exception:
-            pass
+        cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
+        q = _apply_post_cursor_filter(q, cur_dt, cur_id)
 
-    rows = q.limit(limit).all()
+    rows_plus = q.limit(limit + 1).all()
+    has_more = len(rows_plus) > limit
+    rows = rows_plus[:limit]
 
     # 좋아요 여부는 username 기준으로 계산
     liked_ids = set()
@@ -1014,14 +1044,14 @@ def list_posts_custom_by_user_settings(
         for p in rows
     ]
 
-    next_cursor = rows[-1].created_at.isoformat() if rows else None
+    next_cursor = _make_post_cursor(rows[-1].created_at, rows[-1].id) if rows and has_more else None
     return PostsOut2(items=items, next_cursor=next_cursor)
 
 
 @app.get("/community/posts", response_model=PostsOut2)
 def list_posts(
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명"),
-    cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
+    cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
@@ -1029,7 +1059,9 @@ def list_posts(
     city: Optional[str] = Query(None, description="지역 필터: 시/군/구"),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Community_Post).filter(Community_Post.post_type == 1).order_by(Community_Post.created_at.desc())
+    q = db.query(Community_Post).filter(Community_Post.post_type == 1).order_by(
+        Community_Post.created_at.desc(), Community_Post.id.desc()
+    )
 
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
@@ -1074,13 +1106,12 @@ def list_posts(
             q = q.filter(or_(Community_Post.city == city, Community_Post.city.like(f"%{city}%")))
 
     if cursor:
-        try:
-            cur_dt = datetime.fromisoformat(cursor)
-            q = q.filter(Community_Post.created_at < cur_dt)
-        except Exception:
-            pass
+        cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
+        q = _apply_post_cursor_filter(q, cur_dt, cur_id)
 
-    rows = q.limit(limit).all()
+    rows_plus = q.limit(limit + 1).all()
+    has_more = len(rows_plus) > limit
+    rows = rows_plus[:limit]
 
     liked_ids = set()
     if username and rows:
@@ -1165,7 +1196,7 @@ def list_posts(
         for p in rows
     ]
 
-    next_cursor = rows[-1].created_at.isoformat() if rows else None
+    next_cursor = _make_post_cursor(rows[-1].created_at, rows[-1].id) if rows and has_more else None
     return PostsOut2(items=items, next_cursor=next_cursor)
 
 
@@ -1174,7 +1205,7 @@ def search_posts_by_title(
     q: str = Query(..., description="검색어(제목 포함)", min_length=1, max_length=80),
     post_type: int = Query(1, description="게시글 타입(기본: 1=현장/구인글)"),
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명(선택)"),
-    cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
+    cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query("published", description="published | closed (선택)"),
     db: Session = Depends(get_db),
@@ -1191,7 +1222,7 @@ def search_posts_by_title(
     query = (
         db.query(Community_Post)
         .filter(Community_Post.post_type == int(post_type))
-        .order_by(Community_Post.created_at.desc())
+        .order_by(Community_Post.created_at.desc(), Community_Post.id.desc())
     )
     if status in ("published", "closed"):
         query = query.filter(Community_Post.status == status)
@@ -1200,13 +1231,12 @@ def search_posts_by_title(
     query = query.filter(Community_Post.title.ilike(f"%{keyword}%"))
 
     if cursor:
-        try:
-            cur_dt = datetime.fromisoformat(cursor)
-            query = query.filter(Community_Post.created_at < cur_dt)
-        except Exception:
-            pass
+        cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
+        query = _apply_post_cursor_filter(query, cur_dt, cur_id)
 
-    rows = query.limit(limit).all()
+    rows_plus = query.limit(limit + 1).all()
+    has_more = len(rows_plus) > limit
+    rows = rows_plus[:limit]
 
     liked_ids = set()
     if username and rows:
@@ -1292,7 +1322,7 @@ def search_posts_by_title(
         for p in rows
     ]
 
-    next_cursor = rows[-1].created_at.isoformat() if rows else None
+    next_cursor = _make_post_cursor(rows[-1].created_at, rows[-1].id) if rows and has_more else None
     return PostsOut2(items=items, next_cursor=next_cursor)
 
 
@@ -1300,7 +1330,7 @@ def search_posts_by_title(
 def list_posts_plus(
     post_type: int,
     username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명"),
-    cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
+    cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
@@ -1308,7 +1338,9 @@ def list_posts_plus(
     city: Optional[str] = Query(None, description="지역 필터: 시/군/구"),
     db: Session = Depends(get_db),
 ):
-    q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(Community_Post.created_at.desc())
+    q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(
+        Community_Post.created_at.desc(), Community_Post.id.desc()
+    )
 
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
@@ -1351,13 +1383,12 @@ def list_posts_plus(
             q = q.filter(or_(Community_Post.city == city, Community_Post.city.like(f"%{city}%")))
 
     if cursor:
-        try:
-            cur_dt = datetime.fromisoformat(cursor)
-            q = q.filter(Community_Post.created_at < cur_dt)
-        except Exception:
-            pass
+        cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
+        q = _apply_post_cursor_filter(q, cur_dt, cur_id)
 
-    rows = q.limit(limit).all()
+    rows_plus = q.limit(limit + 1).all()
+    has_more = len(rows_plus) > limit
+    rows = rows_plus[:limit]
 
     liked_ids = set()
     if username and rows:
@@ -1442,7 +1473,7 @@ def list_posts_plus(
         for p in rows
     ]
 
-    next_cursor = rows[-1].created_at.isoformat() if rows else None
+    next_cursor = _make_post_cursor(rows[-1].created_at, rows[-1].id) if rows and has_more else None
     return PostsOut2(items=items, next_cursor=next_cursor)
 
 
@@ -1450,13 +1481,15 @@ def list_posts_plus(
 def list_my_posts_by_type(
     post_type: int,
     username: str,
-    cursor: Optional[str] = Query(None, description="커서: ISO8601 created_at"),
+    cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
     db: Session = Depends(get_db),
 ):
     user_id = get_user_id_by_username(db, username)
-    q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(Community_Post.created_at.desc())
+    q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(
+        Community_Post.created_at.desc(), Community_Post.id.desc()
+    )
 
     super_users = {1, 10, 13, 20, 21, 22, 23, 24, 25, 26, 27, 28}
 
@@ -1467,9 +1500,12 @@ def list_my_posts_by_type(
         q = q.filter(Community_Post.status == status)
 
     if cursor:
-        q = q.filter(Community_Post.created_at < cursor)
+        cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
+        q = _apply_post_cursor_filter(q, cur_dt, cur_id)
 
-    rows = q.limit(limit).all()
+    rows_plus = q.limit(limit + 1).all()
+    has_more = len(rows_plus) > limit
+    rows = rows_plus[:limit]
 
     liked_ids = set()
     if rows:
@@ -1553,7 +1589,7 @@ def list_my_posts_by_type(
         for p in rows
     ]
 
-    next_cursor = rows[-1].created_at.isoformat() if rows else None
+    next_cursor = _make_post_cursor(rows[-1].created_at, rows[-1].id) if rows and has_more else None
     return PostsOut2(items=items, next_cursor=next_cursor)
 
 
