@@ -969,7 +969,7 @@ def list_posts_custom_by_user_settings(
     # --- 모집(역할) 필터 ---
     # 저장 값(대표 5종):
     # - "총괄" => total_use
-    # - "본부장" => branch_use(본부장) OR hq_use(본부)
+    # - "본부장" => branch_use(본부장)만
     # - "팀장" => leader_use(팀장) OR team_use(팀)
     # - "팀원" => member_use(팀원) OR each_use(각개)
     # - "기타" => other_role_name 존재
@@ -979,7 +979,7 @@ def list_posts_custom_by_user_settings(
         if "총괄" in roles:
             role_conds.append(Community_Post.total_use.is_(True))
         if "본부장" in roles:
-            role_conds.append(or_(Community_Post.branch_use.is_(True), Community_Post.hq_use.is_(True)))
+            role_conds.append(Community_Post.branch_use.is_(True))
         if "팀장" in roles:
             role_conds.append(or_(Community_Post.leader_use.is_(True), Community_Post.team_use.is_(True)))
         if "팀원" in roles:
