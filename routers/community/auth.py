@@ -122,7 +122,7 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
         return {"status": 10, "detail": "이미 등록된 휴대폰 번호가 있습니다."}
 
     if req.region is None:
-        return {"status": 3}
+        return {"status": 5}
 
     # phone 테이블 기준 "기존에 사용된 번호"인지 확인 (추천인 시스템 차단용)
     phone_already_saved = db.query(Phone.id).filter(Phone.phone == digits).first() is not None
