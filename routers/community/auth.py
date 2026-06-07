@@ -118,8 +118,9 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
         rows = db.query(Community_User).filter(Community_User.phone_number.isnot(None)).all()
         phone_already_registered = any(_normalize_phone(u.phone_number or "") == digits for u in rows)
 
-    if phone_already_registered:
-        return {"status": 10, "detail": "이미 등록된 휴대폰 번호가 있습니다."}
+    # Allow signup even if the phone number is already present in community_users.
+    # Previously this returned status 10 and blocked signup; remove that block so
+    # users can register with a phone number already present in historical records.
 
     if req.region is None:
         return {"status": 5}
