@@ -1,2 +1,6 @@
+[tools]
+python = "3.11"
+poetry = "latest"
+
 [settings]
 python.github_attestations = false
