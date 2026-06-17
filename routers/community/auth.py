@@ -81,7 +81,7 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     # 휴대폰 인증 강제
     digits = _normalize_phone(req.phone_number)
     if not _is_valid_korean_phone(digits):
-        raise HTTPException(status_code=400, detail="invalid phone_number")
+        raise HTTPException(status_code=400, detail="올바른 휴대폰 번호를 입력해 주세요.")
 
     if not req.phone_verification_id:
         return {"status": 9, "detail": "휴대폰 인증이 필요합니다."}
@@ -157,7 +157,7 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         print(f"[ERROR] referral_code 할당 중 예상치 못한 오류: {e}")
-        raise HTTPException(status_code=500, detail="회원가입 처리 중 오류가 발생했습니다")
+        raise HTTPException(status_code=500, detail="회원가입 처리 중 오류가 발생했습니다.")
 
     # phone 테이블에 번호 영구 저장 (중복이면 삽입 스킵)
     if not phone_already_saved:
@@ -291,15 +291,15 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/community/login", response_model=LoginResponse)
+@router.post("/community/login")
 def community_login(req: LoginRequest2, db: Session = Depends(get_db)):
     user = db.query(Community_User).filter(Community_User.username == req.username).first()
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        return {"status": 1, "detail": "아이디 또는 비밀번호를 확인하세요."}
 
     pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
     if user.password_hash != pw_hash:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        return {"status": 1, "detail": "아이디 또는 비밀번호를 확인하세요."}
 
     if req.push_token:
         user.push_token = req.push_token
@@ -308,5 +308,5 @@ def community_login(req: LoginRequest2, db: Session = Depends(get_db)):
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     token = jwt.encode({"sub": str(user.id), "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
-    return LoginResponse(user_id=user.id, token=token)
+    return {"status": 0, "user_id": user.id, "token": token}
 
