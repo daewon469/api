@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import imghdr
 import os
 import re
 import threading
@@ -88,10 +87,20 @@ def _strip_data_url(b64: str) -> str:
     return re.sub(r"^data:.*;base64,", "", b64 or "")
 
 
+def _detect_image_kind(raw_bytes: bytes) -> str | None:
+    if raw_bytes.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if raw_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if raw_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    return None
+
+
 def _ensure_ext(path: Path, raw_bytes: bytes) -> Path:
     if path.suffix:
         return path
-    kind = imghdr.what(None, h=raw_bytes)  # 'jpeg' | 'png' ...
+    kind = _detect_image_kind(raw_bytes)
     ext = {"jpeg": ".jpg", "png": ".png", "gif": ".gif"}.get(kind, ".jpg")
     return path.with_suffix(ext)
 
