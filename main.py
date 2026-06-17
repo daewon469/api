@@ -50,7 +50,10 @@ from fastapi.responses import HTMLResponse
 import openpyxl, tempfile
 from starlette.background import BackgroundTask
 from rss_service import fetch_rss_and_save, parse_pubdate
-Base.metadata.create_all(bind=engine)
+# Skip automatic metadata creation when SKIP_DB_CREATE=1 to allow
+# runtime validation without a full Postgres environment.
+if os.getenv("SKIP_DB_CREATE") != "1":
+    Base.metadata.create_all(bind=engine)
 app = FastAPI()
 bearer = HTTPBearer(auto_error=True)
 
