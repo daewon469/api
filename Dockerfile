@@ -3,9 +3,9 @@ FROM python:3.13-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# libpq (Postgres client library) 설치
+# libpq + SQLAlchemy/psycopg2 빌드에 필요한 도구 (slim 이미지)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libpq5 \
+ && apt-get install -y --no-install-recommends libpq5 gcc python3-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
