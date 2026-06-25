@@ -62,11 +62,20 @@ class UIConfigTitleSearch(BaseModel):
     recommended_post_ids: List[int] = Field(default_factory=list)
 
 
+class UIConfigSlidePosts(BaseModel):
+    """
+    첫화면 슬라이드(Postcard_S)에 노출할 구인글 목록.
+    - post_ids: 노출 순서대로 post_id 목록
+    """
+    post_ids: List[int] = Field(default_factory=list)
+
+
 class UIConfigPayload(BaseModel):
     banner: UIConfigBanner = Field(default_factory=UIConfigBanner)
     top_banner: UIConfigTopBanner = Field(default_factory=UIConfigTopBanner)
     popup: UIConfigPopup = Field(default_factory=UIConfigPopup)
     title_search: UIConfigTitleSearch = Field(default_factory=UIConfigTitleSearch)
+    slide_posts: UIConfigSlidePosts = Field(default_factory=UIConfigSlidePosts)
 
 
 def _default_ui_config_dict() -> dict:
@@ -96,6 +105,9 @@ def _default_ui_config_dict() -> dict:
             "enabled": True,
             "recommended_post_ids": [],
         },
+        "slide_posts": {
+            "post_ids": [],
+        },
     }
 
 
@@ -107,6 +119,7 @@ def _normalize_ui_config(raw: dict | None) -> dict:
     top_banner = raw.get("top_banner") if isinstance(raw.get("top_banner"), dict) else {}
     popup = raw.get("popup") if isinstance(raw.get("popup"), dict) else {}
     title_search = raw.get("title_search") if isinstance(raw.get("title_search"), dict) else {}
+    slide_posts = raw.get("slide_posts") if isinstance(raw.get("slide_posts"), dict) else {}
 
     base["banner"]["enabled"] = bool(banner.get("enabled", base["banner"]["enabled"]))
     try:
@@ -327,6 +340,26 @@ def _normalize_ui_config(raw: dict | None) -> dict:
         seen.add(n)
         uniq_ids.append(n)
     base["title_search"]["recommended_post_ids"] = uniq_ids
+
+    # slide_posts: first-screen slider post ids (order preserved)
+    slide_ids_raw = slide_posts.get("post_ids", [])
+    slide_ids: list[int] = []
+    if isinstance(slide_ids_raw, list):
+        for v in slide_ids_raw:
+            try:
+                n = int(v)
+            except Exception:
+                continue
+            if n > 0:
+                slide_ids.append(n)
+    slide_seen = set()
+    uniq_slide_ids: list[int] = []
+    for n in slide_ids:
+        if n in slide_seen:
+            continue
+        slide_seen.add(n)
+        uniq_slide_ids.append(n)
+    base["slide_posts"]["post_ids"] = uniq_slide_ids
     return base
 
 

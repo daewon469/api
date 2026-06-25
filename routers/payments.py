@@ -32,6 +32,10 @@ TOSS_SECRET_KEY = os.getenv("TOSS_SECRET_KEY", "").strip()
 
 # 결제 성공/실패 시 앱으로 돌아오는 딥링크 스킴
 TOSS_APP_SCHEME = os.getenv("TOSS_APP_SCHEME", "smartgauge").strip() or "smartgauge"
+# 웹 결제 완료 후 리다이렉트 기준 URL (platform=web)
+TOSS_WEB_BASE_URL = (
+    os.getenv("TOSS_WEB_BASE_URL", "https://daewon469.com").strip().rstrip("/")
+)
 
 # 캐시 충전 허용 금액(서버가 최종 결정)
 ALLOWED_CASH_AMOUNTS = {10000, 30000, 50000, 80000, 100000}
@@ -102,6 +106,7 @@ def pay_toss_page(
     orderName: str = Query("캐시 충전"),
     customerName: str = Query("고객"),
     customerEmail: str | None = Query(None),
+    platform: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """
@@ -128,9 +133,13 @@ def pay_toss_page(
     if int(pay.amount) != int(amount):
         raise HTTPException(status_code=400, detail="amount mismatch")
 
-    # Toss가 paymentKey/orderId/amount를 query로 붙여서 redirect
-    success_url = f"{TOSS_APP_SCHEME}://toss/success"
-    fail_url = f"{TOSS_APP_SCHEME}://toss/fail"
+  # Toss가 paymentKey/orderId/amount를 query로 붙여서 redirect
+    if str(platform or "").strip().lower() == "web":
+        success_url = f"{TOSS_WEB_BASE_URL}/payment/toss/success"
+        fail_url = f"{TOSS_WEB_BASE_URL}/payment/toss/fail"
+    else:
+        success_url = f"{TOSS_APP_SCHEME}://toss/success"
+        fail_url = f"{TOSS_APP_SCHEME}://toss/fail"
 
     # customerEmail은 선택값. (없으면 Toss가 무시)
     customer_email_js = f'"{customerEmail}"' if customerEmail else "undefined"
