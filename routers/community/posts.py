@@ -1054,6 +1054,7 @@ def list_posts(
     cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
+    card_type: Optional[float] = Query(None, description="카드 유형 필터(예: 5=슬라이드)"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
     province: Optional[str] = Query(None, description="지역 필터: 시/도"),
     city: Optional[str] = Query(None, description="지역 필터: 시/군/구"),
@@ -1065,6 +1066,9 @@ def list_posts(
 
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
+
+    if card_type is not None:
+        q = q.filter(Community_Post.card_type == card_type)
 
     # 지역 필터링 (서버 측)
     # - regions(복수)가 우선
@@ -1333,6 +1337,7 @@ def list_posts_plus(
     cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
+    card_type: Optional[float] = Query(None, description="카드 유형 필터(예: 5=슬라이드)"),
     regions: Optional[str] = Query(None, description="지역 필터(복수): 콤마로 구분. 예) 서울특별시,경기도 수원시"),
     province: Optional[str] = Query(None, description="지역 필터: 시/도"),
     city: Optional[str] = Query(None, description="지역 필터: 시/군/구"),
@@ -1344,6 +1349,9 @@ def list_posts_plus(
 
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
+
+    if card_type is not None:
+        q = q.filter(Community_Post.card_type == card_type)
 
     # 지역 필터링 (서버 측)
     if regions:
