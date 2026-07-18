@@ -42,7 +42,8 @@ GRADE_REWARD_BY_GRADE: dict[int, int] = {
     1: 100_000,  # 세미프로
     2: 200_000,  # 프로
     3: 500_000,  # 마스터
-    4: 1_000_000,  # 레전드
+    4: 1_000_000,  # 챌린저
+    5: 5_000_000,  # 레전드
 }
 
 
@@ -55,9 +56,12 @@ def _grade_from_referral_count(referral_count: int) -> int:
        1: 세미프로(10명 이상)
        2: 프로(20명 이상)
        3: 마스터(50명 이상)
-       4: 레전드(100명 이상)
+       4: 챌린저(100명 이상)
+       5: 레전드(500명 이상)
     """
     c = int(referral_count or 0)
+    if c >= 500:
+        return 5
     if c >= 100:
         return 4
     if c >= 50:

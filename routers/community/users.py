@@ -203,7 +203,7 @@ def get_mypage(username: str, db: Session = Depends(get_db)):
     return {
         "status": 0,
         "signup_date": signup_date_str,
-        # user_grade: -1-일반회원 / 0-아마추어 / 1-세미프로 / 2-프로 / 3-마스터 / 4-레전드
+        # user_grade: -1-일반회원 / 0-아마추어 / 1-세미프로 / 2-프로 / 3-마스터 / 4-챌린저 / 5-레전드
         "user_grade": int(user.user_grade) if getattr(user, "user_grade", None) is not None else -1,
         "is_owner": bool(getattr(user, "is_owner", False)),
         "posts": {"type1": counts[1], "type3": counts[3], "type4": counts[4], "type6": counts[6]},

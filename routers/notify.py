@@ -49,12 +49,17 @@ def get_user_id_by_username(db: Session, username: str) -> int:
 
 
 def send_push(token, title, body, data=None, badge=1):
+    push_data = {
+        str(key): str(value)
+        for key, value in (data or {}).items()
+        if value is not None
+    }
     message = {
         "to": token,
         "sound": "default",
         "title": title,
         "body": body,
-        "data": data or {},
+        "data": push_data,
         "badge": badge,
         "priority": "high",
         "channelId": "default",

@@ -64,6 +64,26 @@ class SignupRequest_C(BaseModel):
     custom_role_codes: list[str] = Field(default_factory=list)
 
 
+@router.get("/community/username/check")
+def community_check_username(
+    username: str,
+    exclude: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """아이디(닉네임) 중복확인. status 0=사용가능, 1=중복, 2=형식오류."""
+    name = (username or "").strip()
+    if len(name) < 2 or len(name) > 50:
+        return {"status": 2, "available": False, "detail": "닉네임은 2~50글자여야 합니다."}
+
+    q = db.query(Community_User.id).filter(Community_User.username == name)
+    exclude_name = (exclude or "").strip()
+    if exclude_name:
+        q = q.filter(Community_User.username != exclude_name)
+    if q.first() is not None:
+        return {"status": 1, "available": False}
+    return {"status": 0, "available": True}
+
+
 @router.post("/community/signup")
 def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     if db.query(Community_User).filter(Community_User.username == req.username).first():
@@ -77,6 +97,9 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
 
     if req.phone_number is None:
         return {"status": 4}
+
+    if req.region is None:
+        return {"status": 5}
 
     # 휴대폰 인증 강제
     digits = _normalize_phone(req.phone_number)
@@ -99,31 +122,6 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
         or (vrow.expires_at is not None and vrow.expires_at <= now)
     ):
         return {"status": 9, "detail": "휴대폰 인증이 필요합니다."}
-
-    # community_users 테이블 기준 "동일 휴대폰 번호" 중복 가입 차단
-    # (과거 데이터에 하이픈이 포함되어 있을 수 있어 숫자만 비교)
-    try:
-        dialect = db.get_bind().dialect.name
-    except Exception:
-        dialect = ""
-
-    if dialect == "postgresql":
-        phone_already_registered = (
-            db.query(Community_User.id)
-            .filter(func.regexp_replace(Community_User.phone_number, r"[^0-9]", "", "g") == digits)
-            .first()
-            is not None
-        )
-    else:
-        rows = db.query(Community_User).filter(Community_User.phone_number.isnot(None)).all()
-        phone_already_registered = any(_normalize_phone(u.phone_number or "") == digits for u in rows)
-
-    # Allow signup even if the phone number is already present in community_users.
-    # Previously this returned status 10 and blocked signup; remove that block so
-    # users can register with a phone number already present in historical records.
-
-    if req.region is None:
-        return {"status": 5}
 
     # phone 테이블 기준 "기존에 사용된 번호"인지 확인 (추천인 시스템 차단용)
     phone_already_saved = db.query(Phone.id).filter(Phone.phone == digits).first() is not None
@@ -266,7 +264,6 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
             return {"status": 8, "detail": "추천인 처리 중 DB 오류가 발생했습니다."}
 
     db.commit()
-    db.refresh(user)
 
     # 회원가입 푸쉬 알림(관리자 대상: admin_acknowledged=True) - 실패해도 회원가입 성공 처리
     try:

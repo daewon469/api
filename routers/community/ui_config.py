@@ -44,6 +44,31 @@ class UIConfigTopBanner(BaseModel):
     resize_mode: Literal["contain", "cover", "stretch"] = "contain"
 
 
+class UIConfigWebTopBanner(BaseModel):
+    """웹(데스크탑) 홈 상단 배너 — 고정 1행 3개"""
+    enabled: bool = True
+    items: List[UIConfigBannerItem] = Field(default_factory=list)
+    cols_per_row: int = Field(default=3, ge=3, le=3)
+    # 구버전 클라이언트 payload 호환용. 저장 시 1로 정규화한다.
+    rotation_count: int = Field(default=1, ge=1, le=10)
+    height: int = Field(default=160, ge=60, le=260)
+    resize_mode: Literal["contain", "cover", "stretch"] = "contain"
+    auto_play_ms: int = Field(default=4000, ge=0, le=60000)
+
+
+class UIConfigWebBanner(BaseModel):
+    """웹(데스크탑) 피드(하단) 배너 — N줄마다 M행(각 3열) 삽입"""
+    enabled: bool = True
+    items: List[UIConfigBannerItem] = Field(default_factory=list)
+    cols_per_row: int = Field(default=3, ge=3, le=3)
+    interval_rows: int = Field(default=3, ge=1, le=100)
+    rows_per_interval: int | None = Field(default=None, ge=1, le=10)
+    # 구버전 클라이언트 payload 호환용 별칭.
+    rotation_count: int | None = Field(default=None, ge=1, le=10)
+    height: int = Field(default=160, ge=60, le=260)
+    resize_mode: Literal["contain", "cover", "stretch"] = "contain"
+
+
 class UIConfigPopup(BaseModel):
     enabled: bool = True
     image_url: str | None = Field(default=None, max_length=1024)
@@ -73,6 +98,8 @@ class UIConfigSlidePosts(BaseModel):
 class UIConfigPayload(BaseModel):
     banner: UIConfigBanner = Field(default_factory=UIConfigBanner)
     top_banner: UIConfigTopBanner = Field(default_factory=UIConfigTopBanner)
+    web_top_banner: UIConfigWebTopBanner = Field(default_factory=UIConfigWebTopBanner)
+    web_banner: UIConfigWebBanner = Field(default_factory=UIConfigWebBanner)
     popup: UIConfigPopup = Field(default_factory=UIConfigPopup)
     title_search: UIConfigTitleSearch = Field(default_factory=UIConfigTitleSearch)
     slide_posts: UIConfigSlidePosts = Field(default_factory=UIConfigSlidePosts)
@@ -91,6 +118,25 @@ def _default_ui_config_dict() -> dict:
             "enabled": True,
             "items": [],
             "height": 70,
+            "resize_mode": "contain",
+        },
+        "web_top_banner": {
+            "enabled": True,
+            "items": [],
+            "cols_per_row": 3,
+            "rotation_count": 1,
+            "height": 160,
+            "resize_mode": "contain",
+            "auto_play_ms": 0,
+        },
+        "web_banner": {
+            "enabled": True,
+            "items": [],
+            "cols_per_row": 3,
+            "interval_rows": 3,
+            "rows_per_interval": 3,
+            "rotation_count": 3,
+            "height": 160,
             "resize_mode": "contain",
         },
         "popup": {
@@ -289,6 +335,112 @@ def _normalize_ui_config(raw: dict | None) -> dict:
                 }
             )
     base["top_banner"]["items"] = norm_top_items
+
+    def _norm_banner_items_list(
+        raw_items: object,
+        *,
+        max_items: int,
+        default_height: int,
+        default_resize: str,
+    ) -> list[dict]:
+        norm: list[dict] = []
+        if not isinstance(raw_items, list):
+            return norm
+        for it in raw_items[:max_items]:
+            if not isinstance(it, dict):
+                continue
+            img = str(it.get("image_url") or "").strip()
+            if not img:
+                continue
+            link = it.get("link_url", None)
+            link_s = str(link).strip() if isinstance(link, str) else None
+            ca = it.get("click_action", None)
+            ca_s = str(ca).strip().lower() if isinstance(ca, str) else None
+            click_action = ca_s if ca_s in ("link", "referral_modal") else None
+            try:
+                wp = int(it.get("width_percent", 100))
+            except Exception:
+                wp = 100
+            wp = max(40, min(100, wp))
+            try:
+                wpx_raw = it.get("width_px", None)
+                wpx = int(wpx_raw) if wpx_raw is not None and str(wpx_raw).strip() != "" else None
+            except Exception:
+                wpx = None
+            if wpx is not None:
+                wpx = max(120, min(1200, wpx))
+            try:
+                h = int(it.get("height", default_height))
+            except Exception:
+                h = default_height
+            h = max(60, min(260, h))
+            irm = it.get("resize_mode", default_resize)
+            irm_s = str(irm).strip().lower() if isinstance(irm, str) else str(default_resize)
+            irm_s = irm_s if irm_s in ("contain", "cover", "stretch") else "contain"
+            norm.append(
+                {
+                    "image_url": img,
+                    "link_url": link_s or None,
+                    "click_action": click_action,
+                    "width_percent": wp,
+                    "width_px": wpx,
+                    "height": h,
+                    "resize_mode": irm_s,
+                }
+            )
+        return norm
+
+    def _norm_web_section(raw_section: object, base_section: dict, *, item_cap: int) -> None:
+        sec = raw_section if isinstance(raw_section, dict) else {}
+        base_section["enabled"] = bool(sec.get("enabled", base_section["enabled"]))
+        try:
+            base_section["cols_per_row"] = int(sec.get("cols_per_row", base_section["cols_per_row"]))
+        except Exception:
+            base_section["cols_per_row"] = 3
+        if base_section["cols_per_row"] != 3:
+            base_section["cols_per_row"] = 3
+        try:
+            base_section["height"] = int(sec.get("height", base_section["height"]))
+        except Exception:
+            pass
+        base_section["height"] = max(60, min(260, int(base_section["height"])))
+        rm = sec.get("resize_mode", base_section["resize_mode"])
+        rm_s = str(rm).strip().lower() if isinstance(rm, str) else str(base_section["resize_mode"])
+        base_section["resize_mode"] = rm_s if rm_s in ("contain", "cover", "stretch") else "contain"
+        base_section["items"] = _norm_banner_items_list(
+            sec.get("items"),
+            max_items=item_cap,
+            default_height=int(base_section["height"]),
+            default_resize=str(base_section["resize_mode"]),
+        )
+
+    web_top_banner = raw.get("web_top_banner") if isinstance(raw.get("web_top_banner"), dict) else {}
+    _norm_web_section(web_top_banner, base["web_top_banner"], item_cap=3)
+    base["web_top_banner"]["rotation_count"] = 1
+    base["web_top_banner"]["auto_play_ms"] = 0
+    base["web_top_banner"]["items"] = base["web_top_banner"]["items"][:3]
+
+    web_banner = raw.get("web_banner") if isinstance(raw.get("web_banner"), dict) else {}
+    _norm_web_section(web_banner, base["web_banner"], item_cap=30)
+    try:
+        interval_rows = int(web_banner.get("interval_rows", base["web_banner"]["interval_rows"]))
+    except Exception:
+        interval_rows = 3
+    base["web_banner"]["interval_rows"] = max(1, min(100, interval_rows))
+
+    rows_raw = web_banner.get("rows_per_interval")
+    if rows_raw is None:
+        rows_raw = web_banner.get("rotation_count", base["web_banner"]["rows_per_interval"])
+    try:
+        rows_per_interval = int(rows_raw)
+    except Exception:
+        rows_per_interval = 3
+    rows_per_interval = max(1, min(10, rows_per_interval))
+    base["web_banner"]["rows_per_interval"] = rows_per_interval
+    # 구버전 클라이언트가 계속 읽을 수 있도록 같은 값을 함께 반환한다.
+    base["web_banner"]["rotation_count"] = rows_per_interval
+    cap_feed = rows_per_interval * int(base["web_banner"]["cols_per_row"])
+    base["web_banner"]["items"] = base["web_banner"]["items"][:cap_feed]
 
     base["popup"]["enabled"] = bool(popup.get("enabled", base["popup"]["enabled"]))
     img = popup.get("image_url", None)
