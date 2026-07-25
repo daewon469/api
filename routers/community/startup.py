@@ -6,7 +6,7 @@ from sqlalchemy import text
 from database import SessionLocal, engine
 
 
-from .logic import _rollover_recruit_card_types
+from .logic import _rollover_recruit_and_slide_card_types
 
 
 def register_startup(app: FastAPI) -> None:
@@ -33,18 +33,19 @@ def ensure_schema() -> None:
 def _startup_enforce_recruit_card_limits() -> None:
     """
     서버 기동 시 구인글(post_type=1)의 card_type 개수 제한을 1회 적용.
-    - 현재는 card_type=1(최대 30개)만 롤오버 정책이 적용됩니다.
+    - 슬라이드(card_type=5) 최대 10개(핀+최신)
+    - 1유형(card_type=1) 최대 30개
     """
     db = SessionLocal()
     try:
-        _rollover_recruit_card_types(db)
+        _rollover_recruit_and_slide_card_types(db)
         db.commit()
     except Exception as e:
         try:
             db.rollback()
         except Exception:
             pass
-        print("[WARN] startup recruit card rollover failed:", e)
+        print("[WARN] startup recruit/slide card rollover failed:", e)
     finally:
         db.close()
 

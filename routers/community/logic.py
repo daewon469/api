@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
-from models import Community_Post, Community_User, Point, Referral
+from models import Community_Post, Community_UI_Config, Community_User, Point, Referral
 
 # -------------------- Community Post card_type rollover --------------------
 # 요구사항:
 # - 구인글(post_type=1)은 write.tsx에서 항상 card_type=1로 등록됨
 # - 서버에서 card_type=1 글이 30개 초과 시: 가장 오래된 1유형을 2유형으로 변경
 CARD1_MAX = 30
+# 슬라이드(Postcard_S): 사용자 핀(N) + 최신(10-N) = 최대 10개를 card_type=5로 유지
+SLIDE_CARD_MAX = 10
+CARD_TYPE_SLIDE = 5
 # 광고글(post_type=4): 카테고리(job_industry)별 목록 개수 제한
 AD_CARD1_MAX = 5  # (=카테고리별 최대 published 개수)
 AD_PRIMARY_CATEGORY = "광고"
@@ -117,6 +121,189 @@ def _apply_user_grade_upgrade(db: Session, user: Community_User, referral_count:
     user.user_grade = target
     db.add(user)
     return True
+
+
+def _get_slide_pinned_ids(db: Session) -> list[int]:
+    """
+    UIConfig.slide_posts.post_ids (관리자/사용자 선택 핀)를 순서 유지·중복 제거·최대 10개로 반환.
+    """
+    row = db.query(Community_UI_Config).filter(Community_UI_Config.id == 1).first()
+    cfg = getattr(row, "config", None) if row else None
+    if not isinstance(cfg, dict):
+        return []
+    sp = cfg.get("slide_posts")
+    if not isinstance(sp, dict):
+        return []
+    raw = sp.get("post_ids", [])
+    if not isinstance(raw, list):
+        return []
+    seen: set[int] = set()
+    out: list[int] = []
+    for v in raw:
+        try:
+            n = int(v)
+        except Exception:
+            continue
+        if n <= 0 or n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+        if len(out) >= SLIDE_CARD_MAX:
+            break
+    return out
+
+
+def _prune_slide_pinned_id(db: Session, post_id: int) -> None:
+    """삭제된 게시글을 slide_posts.post_ids에서 제거."""
+    try:
+        pid = int(post_id)
+    except Exception:
+        return
+    if pid <= 0:
+        return
+    row = (
+        db.query(Community_UI_Config)
+        .filter(Community_UI_Config.id == 1)
+        .with_for_update()
+        .first()
+    )
+    if not row or not isinstance(getattr(row, "config", None), dict):
+        return
+    cfg = dict(row.config)
+    sp = cfg.get("slide_posts")
+    if not isinstance(sp, dict):
+        return
+    ids_raw = sp.get("post_ids", [])
+    if not isinstance(ids_raw, list) or not ids_raw:
+        return
+    new_ids: list[int] = []
+    changed = False
+    for v in ids_raw:
+        try:
+            n = int(v)
+        except Exception:
+            changed = True
+            continue
+        if n == pid:
+            changed = True
+            continue
+        if n > 0:
+            new_ids.append(n)
+    if not changed:
+        return
+    # uniq keep order, max 10
+    seen: set[int] = set()
+    uniq: list[int] = []
+    for n in new_ids:
+        if n in seen:
+            continue
+        seen.add(n)
+        uniq.append(n)
+        if len(uniq) >= SLIDE_CARD_MAX:
+            break
+    cfg["slide_posts"] = {**sp, "post_ids": uniq}
+    row.config = cfg
+    flag_modified(row, "config")
+    db.add(row)
+
+
+def _rollover_slide_card_types(db: Session) -> None:
+    """
+    구인글(post_type=1) 슬라이드(card_type=5)를 최대 10개로 유지합니다.
+    - 핀(N, UIConfig.slide_posts.post_ids): 항상 5유형 유지
+    - 나머지(10-N): published 최신 구인글로 자동 채움
+    - 초과(비핀) 오래된 5 → 1
+    - 부족 시 최신 1 → 5
+    같은 트랜잭션 안에서 호출되어야 합니다. 이후 _rollover_recruit_card_types를 호출하세요.
+    """
+    pinned_ids = _get_slide_pinned_ids(db)
+    valid_pinned: list[int] = []
+    if pinned_ids:
+        existing = {
+            int(r[0])
+            for r in db.query(Community_Post.id)
+            .filter(
+                Community_Post.id.in_(pinned_ids),
+                Community_Post.post_type == 1,
+                Community_Post.status == "published",
+            )
+            .all()
+        }
+        valid_pinned = [pid for pid in pinned_ids if pid in existing]
+
+    pinned_set = set(valid_pinned)
+    auto_n = max(0, SLIDE_CARD_MAX - len(valid_pinned))
+
+    auto_q = db.query(Community_Post.id).filter(
+        Community_Post.post_type == 1,
+        Community_Post.status == "published",
+    )
+    if pinned_set:
+        auto_q = auto_q.filter(~Community_Post.id.in_(pinned_set))
+    auto_ids = [
+        int(r[0])
+        for r in auto_q.order_by(Community_Post.created_at.desc(), Community_Post.id.desc())
+        .limit(auto_n)
+        .all()
+    ]
+    desired = set(valid_pinned) | set(auto_ids)
+
+    # published 구인글 중, 더 이상 슬라이드 대상이 아닌 5유형 → 1
+    current5 = (
+        db.query(Community_Post)
+        .filter(
+            Community_Post.post_type == 1,
+            Community_Post.status == "published",
+            Community_Post.card_type == CARD_TYPE_SLIDE,
+        )
+        .enable_eagerloads(False)
+        .with_for_update()
+        .all()
+    )
+    for p in current5:
+        if int(p.id) not in desired:
+            p.card_type = 1
+            db.add(p)
+
+    # 비정상 5유형(마감/타 post_type 등) → 1
+    orphans = (
+        db.query(Community_Post)
+        .filter(Community_Post.card_type == CARD_TYPE_SLIDE)
+        .filter(
+            or_(
+                Community_Post.post_type != 1,
+                Community_Post.post_type.is_(None),
+                Community_Post.status != "published",
+                Community_Post.status.is_(None),
+            )
+        )
+        .enable_eagerloads(False)
+        .with_for_update()
+        .all()
+    )
+    for p in orphans:
+        p.card_type = 1
+        db.add(p)
+
+    # 목표 집합 → 5유형
+    if desired:
+        targets = (
+            db.query(Community_Post)
+            .filter(Community_Post.id.in_(list(desired)))
+            .enable_eagerloads(False)
+            .with_for_update()
+            .all()
+        )
+        for p in targets:
+            if p.card_type != CARD_TYPE_SLIDE:
+                p.card_type = CARD_TYPE_SLIDE
+                db.add(p)
+
+
+def _rollover_recruit_and_slide_card_types(db: Session) -> None:
+    """슬라이드(5) 유지 후 구인 1유형(30) 롤오버."""
+    _rollover_slide_card_types(db)
+    _rollover_recruit_card_types(db)
 
 
 def _rollover_recruit_card_types(db: Session) -> None:

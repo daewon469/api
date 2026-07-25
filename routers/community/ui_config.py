@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 
 from deps import get_db
 from models import Community_UI_Config
+from .logic import (
+    SLIDE_CARD_MAX,
+    _rollover_recruit_and_slide_card_types,
+)
 
 router = APIRouter()
 
@@ -89,10 +93,10 @@ class UIConfigTitleSearch(BaseModel):
 
 class UIConfigSlidePosts(BaseModel):
     """
-    첫화면 슬라이드(Postcard_S)에 노출할 구인글 목록.
-    - post_ids: 노출 순서대로 post_id 목록
+    첫화면 슬라이드(Postcard_S)에 노출할 구인글 목록(관리자 핀).
+    - post_ids: 노출 우선 순서(최대 10). 부족분은 서버가 최신 구인글로 card_type=5 자동 채움.
     """
-    post_ids: List[int] = Field(default_factory=list)
+    post_ids: List[int] = Field(default_factory=list, max_length=10)
 
 
 class UIConfigPayload(BaseModel):
@@ -101,8 +105,44 @@ class UIConfigPayload(BaseModel):
     web_top_banner: UIConfigWebTopBanner = Field(default_factory=UIConfigWebTopBanner)
     web_banner: UIConfigWebBanner = Field(default_factory=UIConfigWebBanner)
     popup: UIConfigPopup = Field(default_factory=UIConfigPopup)
+    ios_popup: UIConfigPopup = Field(default_factory=UIConfigPopup)
     title_search: UIConfigTitleSearch = Field(default_factory=UIConfigTitleSearch)
     slide_posts: UIConfigSlidePosts = Field(default_factory=UIConfigSlidePosts)
+
+
+def _default_popup_dict() -> dict:
+    return {
+        "enabled": True,
+        "image_url": None,
+        "link_url": None,
+        "width_percent": 92,
+        "height": 360,
+        "resize_mode": "contain",
+    }
+
+
+def _normalize_popup_dict(raw: dict | None, base: dict | None = None) -> dict:
+    out = dict(base or _default_popup_dict())
+    src = raw if isinstance(raw, dict) else {}
+    out["enabled"] = bool(src.get("enabled", out["enabled"]))
+    img = src.get("image_url", None)
+    out["image_url"] = str(img).strip() if isinstance(img, str) and str(img).strip() else None
+    link = src.get("link_url", None)
+    out["link_url"] = str(link).strip() if isinstance(link, str) and str(link).strip() else None
+    try:
+        out["width_percent"] = int(src.get("width_percent", out["width_percent"]))
+    except Exception:
+        out["width_percent"] = 92
+    out["width_percent"] = max(40, min(100, out["width_percent"]))
+    try:
+        out["height"] = int(src.get("height", out["height"]))
+    except Exception:
+        out["height"] = 360
+    out["height"] = max(200, min(900, out["height"]))
+    prm = src.get("resize_mode", out["resize_mode"])
+    prm_s = str(prm).strip().lower() if isinstance(prm, str) else "contain"
+    out["resize_mode"] = prm_s if prm_s in ("contain", "cover", "stretch") else "contain"
+    return out
 
 
 def _default_ui_config_dict() -> dict:
@@ -139,14 +179,8 @@ def _default_ui_config_dict() -> dict:
             "height": 160,
             "resize_mode": "contain",
         },
-        "popup": {
-            "enabled": True,
-            "image_url": None,
-            "link_url": None,
-            "width_percent": 92,
-            "height": 360,
-            "resize_mode": "contain",
-        },
+        "popup": _default_popup_dict(),
+        "ios_popup": _default_popup_dict(),
         "title_search": {
             "enabled": True,
             "recommended_post_ids": [],
@@ -164,6 +198,7 @@ def _normalize_ui_config(raw: dict | None) -> dict:
     banner = raw.get("banner") if isinstance(raw.get("banner"), dict) else {}
     top_banner = raw.get("top_banner") if isinstance(raw.get("top_banner"), dict) else {}
     popup = raw.get("popup") if isinstance(raw.get("popup"), dict) else {}
+    ios_popup = raw.get("ios_popup") if isinstance(raw.get("ios_popup"), dict) else {}
     title_search = raw.get("title_search") if isinstance(raw.get("title_search"), dict) else {}
     slide_posts = raw.get("slide_posts") if isinstance(raw.get("slide_posts"), dict) else {}
 
@@ -442,34 +477,8 @@ def _normalize_ui_config(raw: dict | None) -> dict:
     cap_feed = rows_per_interval * int(base["web_banner"]["cols_per_row"])
     base["web_banner"]["items"] = base["web_banner"]["items"][:cap_feed]
 
-    base["popup"]["enabled"] = bool(popup.get("enabled", base["popup"]["enabled"]))
-    img = popup.get("image_url", None)
-    base["popup"]["image_url"] = str(img).strip() if isinstance(img, str) and str(img).strip() else None
-    link = popup.get("link_url", None)
-    base["popup"]["link_url"] = str(link).strip() if isinstance(link, str) and str(link).strip() else None
-
-    # popup: size options
-    try:
-        base["popup"]["width_percent"] = int(popup.get("width_percent", base["popup"]["width_percent"]))
-    except Exception:
-        base["popup"]["width_percent"] = 92
-    if base["popup"]["width_percent"] < 40:
-        base["popup"]["width_percent"] = 40
-    if base["popup"]["width_percent"] > 100:
-        base["popup"]["width_percent"] = 100
-
-    try:
-        base["popup"]["height"] = int(popup.get("height", base["popup"]["height"]))
-    except Exception:
-        base["popup"]["height"] = 360
-    if base["popup"]["height"] < 200:
-        base["popup"]["height"] = 200
-    if base["popup"]["height"] > 900:
-        base["popup"]["height"] = 900
-
-    prm = popup.get("resize_mode", base["popup"]["resize_mode"])
-    prm_s = str(prm).strip().lower() if isinstance(prm, str) else "contain"
-    base["popup"]["resize_mode"] = prm_s if prm_s in ("contain", "cover", "stretch") else "contain"
+    base["popup"] = _normalize_popup_dict(popup, base["popup"])
+    base["ios_popup"] = _normalize_popup_dict(ios_popup, base["ios_popup"])
 
     # title_search: recommended posts by id
     base["title_search"]["enabled"] = bool(title_search.get("enabled", base["title_search"]["enabled"]))
@@ -493,7 +502,7 @@ def _normalize_ui_config(raw: dict | None) -> dict:
         uniq_ids.append(n)
     base["title_search"]["recommended_post_ids"] = uniq_ids
 
-    # slide_posts: first-screen slider post ids (order preserved)
+    # slide_posts: first-screen slider pinned ids (order preserved, max 10)
     slide_ids_raw = slide_posts.get("post_ids", [])
     slide_ids: list[int] = []
     if isinstance(slide_ids_raw, list):
@@ -511,6 +520,8 @@ def _normalize_ui_config(raw: dict | None) -> dict:
             continue
         slide_seen.add(n)
         uniq_slide_ids.append(n)
+        if len(uniq_slide_ids) >= SLIDE_CARD_MAX:
+            break
     base["slide_posts"]["post_ids"] = uniq_slide_ids
     return base
 
@@ -529,6 +540,16 @@ def community_get_ui_config(db: Session = Depends(get_db)):
         return {"status": 8, "config": _default_ui_config_dict()}
 
 
+def _deep_merge_dict(base: dict, patch: dict) -> dict:
+    out = dict(base)
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = {**out[k], **v}
+        else:
+            out[k] = v
+    return out
+
+
 @router.put("/community/admin/ui-config")
 def community_update_ui_config(
     payload: UIConfigPayload,
@@ -537,8 +558,8 @@ def community_update_ui_config(
     """
     관리자용 UI 설정 저장.
     - 인증 없이 저장(요청사항)
+    - 요청에 없는 섹션(예: ios_popup)은 기존 값을 유지
     """
-    cfg_dict = _normalize_ui_config(payload.model_dump())
     try:
         row = (
             db.query(Community_UI_Config)
@@ -546,16 +567,23 @@ def community_update_ui_config(
             .with_for_update()
             .first()
         )
+        existing = _normalize_ui_config(getattr(row, "config", None) if row else None)
+        patch = payload.model_dump(exclude_unset=True)
+        cfg_dict = _normalize_ui_config(_deep_merge_dict(existing, patch))
         if not row:
             row = Community_UI_Config(id=1, config=cfg_dict)
             db.add(row)
         else:
             row.config = cfg_dict
             db.add(row)
+        db.flush()
+        # 핀 변경 시 슬라이드(5) + 구인(1) 개수 정책을 서버에서 동기화
+        if "slide_posts" in patch:
+            _rollover_recruit_and_slide_card_types(db)
         db.commit()
         db.refresh(row)
         return {"status": 0, "config": _normalize_ui_config(getattr(row, "config", None))}
     except Exception:
         db.rollback()
-        return {"status": 8, "config": cfg_dict}
+        return {"status": 8, "config": _default_ui_config_dict()}
 

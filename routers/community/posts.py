@@ -49,8 +49,9 @@ from routers.community.logic import (
     AD_PRIMARY_CATEGORY,
     _apply_user_grade_upgrade,
     _normalize_ad_job_industry,
+    _prune_slide_pinned_id,
     _rollover_ad_card_types,
-    _rollover_recruit_card_types,
+    _rollover_recruit_and_slide_card_types,
 )
 from routers.community.notifications import notify_admin_acknowledged_post, notify_all_push_post, notify_owners_post
 from routers.notify import create_notification, get_user_id_by_username, send_push
@@ -596,7 +597,7 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
 
     db.add(post)
     db.flush()  # created_at/id 확정 후 롤오버 처리
-    _rollover_recruit_card_types(db)
+    _rollover_recruit_and_slide_card_types(db)
     db.commit()
     db.refresh(post)
 
@@ -811,7 +812,7 @@ def create_post_plus(post_type: int, username: str, body: PostCreate, db: Sessio
     db.flush()
     # 카드 타입 롤오버 정책
     if int(post_type) == 1:
-        _rollover_recruit_card_types(db)
+        _rollover_recruit_and_slide_card_types(db)
     elif int(post_type) == 4:
         # 광고글(post_type=4): 카테고리별 최신 5개 published 유지 (초과분은 closed)
         _rollover_ad_card_types(db)
@@ -1833,7 +1834,7 @@ def recreate_recruit_post(
 
     db.add(post)
     db.flush()
-    _rollover_recruit_card_types(db)
+    _rollover_recruit_and_slide_card_types(db)
     db.commit()
     db.refresh(post)
 
@@ -1947,7 +1948,7 @@ def update_post(
     except Exception:
         pt = 0
     if pt == 1:
-        _rollover_recruit_card_types(db)
+        _rollover_recruit_and_slide_card_types(db)
     if pt == 4:
         # 광고글 정책: 카테고리 정규화
         post.job_industry = _normalize_ad_job_industry(getattr(post, "job_industry", None))
@@ -2038,7 +2039,7 @@ def delete_post(
     if not post:
         raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
 
-    # 삭제 후 post_type=1 카드 정책(30/40 유지)을 다시 맞추기 위해 값 보관
+    # 삭제 후 post_type=1 카드 정책(슬라이드 10 / 1유형 30)을 다시 맞추기 위해 값 보관
     try:
         pt = int(getattr(post, "post_type", 0) or 0)
     except Exception:
@@ -2047,7 +2048,8 @@ def delete_post(
     db.delete(post)
     db.flush()
     if pt == 1:
-        _rollover_recruit_card_types(db)
+        _prune_slide_pinned_id(db, post_id)
+        _rollover_recruit_and_slide_card_types(db)
     db.commit()
     return {"ok": True, "message": "삭제되었습니다."}
 
