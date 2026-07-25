@@ -13,6 +13,10 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your_secret_key")
 ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
+# Gemini (서버 전용 — 클라이언트에 노출 금지)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+
 # RSS
 SECRET_RSS_TOKEN = os.getenv("SECRET_RSS_TOKEN", "rss-secret-token")
 

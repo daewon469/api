@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from .admin import router as admin_router
+from .ai import router as ai_router
 from .auth import router as auth_router
 from .cash import router as cash_router
 from .phone import router as phone_router
@@ -27,6 +28,7 @@ router.include_router(stats_router)
 router.include_router(cash_router)
 router.include_router(users_router)
 router.include_router(posts_router)
+router.include_router(ai_router)
 router.include_router(admin_router)
 router.include_router(ui_config_router)
 router.include_router(popup_router)
