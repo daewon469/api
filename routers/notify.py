@@ -113,14 +113,26 @@ def get_unread_notifications(username: str, db: Session = Depends(get_db)):
 
 
 @router.get("/notify/my/{username}/unread/count")
-def unread_count_by_username(username: str, db: Session = Depends(get_db)):
+def unread_count_by_username(
+    username: str,
+    post_type: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    미확인 알림 개수.
+    - post_type 미지정: 전체 미확인
+    - post_type 지정: data.post_type 이 해당 값인 미확인만 (예: 문의글=6)
+    """
     user_id = get_user_id_by_username(db, username)
-    count = (
-        db.query(Notification)
-        .filter(Notification.user_id == user_id, Notification.is_read == False)
-        .count()
+    q = db.query(Notification).filter(
+        Notification.user_id == user_id,
+        Notification.is_read == False,
     )
-    return {"unread_count": count}
+    if post_type is not None:
+        # PostgreSQL JSON: data->>'post_type' 은 항상 text ("6")
+        pt = int(post_type)
+        q = q.filter(Notification.data["post_type"].astext == str(pt))
+    return {"unread_count": q.count()}
 
 
 @router.post("/notify/read/{notification_id}")

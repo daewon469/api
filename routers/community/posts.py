@@ -169,6 +169,7 @@ class PostCreate(BaseModel):
     status: Optional[StatusLiteral] = "published"
     highlight_color: Optional[str] = None
     highlight_content: Optional[str] = None
+    site_name: Optional[str] = None
     total_use: Optional[bool] = None
     branch_use: Optional[bool] = None
     hq_use: Optional[bool] = None
@@ -242,8 +243,10 @@ class PostOut(BaseModel):
     province: Optional[str] = None
     city: Optional[str] = None
     status: StatusLiteral
+    liked: Optional[bool] = False
     highlight_color: Optional[str] = None
     highlight_content: Optional[str] = None
+    site_name: Optional[str] = None
     total_use: Optional[bool] = None
     branch_use: Optional[bool] = None
     hq_use: Optional[bool] = None
@@ -315,6 +318,7 @@ class PostOut2(BaseModel):
     liked: Optional[bool] = False
     highlight_color: Optional[str] = None
     highlight_content: Optional[str] = None
+    site_name: Optional[str] = None
     total_use: Optional[bool] = None
     branch_use: Optional[bool] = None
     hq_use: Optional[bool] = None
@@ -387,6 +391,7 @@ class PostUpdate(BaseModel):
     status: Optional[StatusLiteral] = None
     highlight_color: Optional[str] = None
     highlight_content: Optional[str] = None
+    site_name: Optional[str] = None
     total_use: Optional[bool] = None
     branch_use: Optional[bool] = None
     hq_use: Optional[bool] = None
@@ -546,6 +551,7 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         status=body.status or "published",
         highlight_color=body.highlight_color,
         highlight_content=body.highlight_content,
+        site_name=body.site_name,
         total_use=body.total_use,
         branch_use=body.branch_use,
         hq_use=getattr(body, "hq_use", None),
@@ -644,6 +650,7 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         status=post.status,
         highlight_color=post.highlight_color,
         highlight_content=post.highlight_content,
+        site_name=post.site_name,
         total_use=post.total_use,
         branch_use=post.branch_use,
         hq_use=getattr(post, "hq_use", None),
@@ -760,6 +767,7 @@ def create_post_plus(post_type: int, username: str, body: PostCreate, db: Sessio
         status=body.status or "published",
         highlight_color=body.highlight_color,
         highlight_content=body.highlight_content,
+        site_name=body.site_name,
         total_use=body.total_use,
         branch_use=body.branch_use,
         hq_use=getattr(body, "hq_use", None),
@@ -881,6 +889,7 @@ def create_post_plus(post_type: int, username: str, body: PostCreate, db: Sessio
         status=post.status,
         highlight_color=post.highlight_color,
         highlight_content=post.highlight_content,
+        site_name=post.site_name,
         total_use=post.total_use,
         branch_use=post.branch_use,
         hq_use=getattr(post, "hq_use", None),
@@ -1159,6 +1168,7 @@ def list_posts(
             liked=(p.id in liked_ids),
             highlight_color=p.highlight_color,
             highlight_content=p.highlight_content,
+            site_name=p.site_name,
             total_use=p.total_use,
             branch_use=p.branch_use,
             hq_use=getattr(p, "hq_use", None),
@@ -1285,6 +1295,7 @@ def search_posts_by_title(
             liked=(p.id in liked_ids),
             highlight_color=p.highlight_color,
             highlight_content=p.highlight_content,
+            site_name=p.site_name,
             total_use=p.total_use,
             branch_use=p.branch_use,
             hq_use=getattr(p, "hq_use", None),
@@ -1440,6 +1451,7 @@ def list_posts_plus(
             liked=(p.id in liked_ids),
             highlight_color=p.highlight_color,
             highlight_content=p.highlight_content,
+            site_name=p.site_name,
             total_use=p.total_use,
             branch_use=p.branch_use,
             hq_use=getattr(p, "hq_use", None),
@@ -1556,6 +1568,7 @@ def list_my_posts_by_type(
             liked=(p.id in liked_ids),
             highlight_color=p.highlight_color,
             highlight_content=p.highlight_content,
+            site_name=p.site_name,
             total_use=p.total_use,
             branch_use=p.branch_use,
             hq_use=getattr(p, "hq_use", None),
@@ -1602,10 +1615,24 @@ def list_my_posts_by_type(
 
 
 @app.get("/community/posts/{post_id}", response_model=PostOut)
-def get_post(post_id: int, db: Session = Depends(get_db)):
+def get_post(
+    post_id: int,
+    username: Optional[str] = Query(None, description="좋아요 여부 계산용 유저명"),
+    db: Session = Depends(get_db),
+):
     p = db.query(Community_Post).filter(Community_Post.id == post_id).first()
     if not p:
         raise HTTPException(status_code=404, detail="Post not found")
+
+    liked = False
+    if username:
+        liked = (
+            db.query(Post_Like.post_id)
+            .filter(Post_Like.post_id == post_id, Post_Like.username == username)
+            .first()
+            is not None
+        )
+
     return PostOut(
         id=p.id,
         author=PostAuthor(id=p.author.id, username=p.author.username),
@@ -1635,8 +1662,10 @@ def get_post(post_id: int, db: Session = Depends(get_db)):
         province=p.province,
         city=p.city,
         status=p.status,
+        liked=liked,
         highlight_color=p.highlight_color,
         highlight_content=p.highlight_content,
+        site_name=p.site_name,
         total_use=p.total_use,
         branch_use=p.branch_use,
         hq_use=getattr(p, "hq_use", None),
@@ -1759,6 +1788,7 @@ def recreate_recruit_post(
         status="published",
         highlight_color=getattr(src, "highlight_color", None),
         highlight_content=getattr(src, "highlight_content", None),
+        site_name=getattr(src, "site_name", None),
         total_use=getattr(src, "total_use", None),
         branch_use=getattr(src, "branch_use", None),
         hq_use=getattr(src, "hq_use", None),
@@ -1855,6 +1885,7 @@ def recreate_recruit_post(
         status=post.status,
         highlight_color=post.highlight_color,
         highlight_content=post.highlight_content,
+        site_name=post.site_name,
         total_use=post.total_use,
         branch_use=post.branch_use,
         hq_use=getattr(post, "hq_use", None),
@@ -1957,6 +1988,7 @@ def update_post(
         status=post.status,
         highlight_color=post.highlight_color,
         highlight_content=post.highlight_content,
+        site_name=post.site_name,
         total_use=post.total_use,
         branch_use=post.branch_use,
         hq_use=getattr(post, "hq_use", None),

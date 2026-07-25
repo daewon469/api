@@ -178,6 +178,7 @@ class Community_Post(Base):
     status = Column(String(20), nullable=False, default="published")
     highlight_color = Column(String(255))
     highlight_content = Column(String(255))
+    site_name = Column(String(255))
     total_use = Column(Boolean) 
     branch_use =Column(Boolean) 
     # 신규 모집 항목: 본부

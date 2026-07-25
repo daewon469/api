@@ -168,6 +168,7 @@ def _ensure_community_posts_columns() -> None:
 
                       ADD COLUMN IF NOT EXISTS highlight_color varchar(255) NULL,
                       ADD COLUMN IF NOT EXISTS highlight_content varchar(255) NULL,
+                      ADD COLUMN IF NOT EXISTS site_name varchar(255) NULL,
 
                       ADD COLUMN IF NOT EXISTS total_use boolean NULL,
                       ADD COLUMN IF NOT EXISTS branch_use boolean NULL,
