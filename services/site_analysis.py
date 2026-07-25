@@ -89,11 +89,14 @@ def request_gemini_site_analysis(body: dict[str, Any]) -> tuple[Optional[str], O
     """
     Returns (analysis_text, error_message).
     """
-    api_key = settings.GEMINI_API_KEY
+    api_key = settings.get_gemini_api_key()
     if not api_key:
-        return None, "GEMINI API 키가 설정되지 않았습니다."
+        return None, (
+            "GEMINI API 키가 설정되지 않았습니다. "
+            "API 서버(Railway) Variables에 GEMINI_API_KEY를 넣고 재배포하세요."
+        )
 
-    model = settings.GEMINI_MODEL or "gemini-3.6-flash"
+    model = settings.get_gemini_model()
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={api_key}"

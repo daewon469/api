@@ -1,10 +1,10 @@
 import os
 
-# .env 로드(로컬/개발 편의). 운영 환경에서는 플랫폼의 환경변수 주입을 권장.
+# .env 로드(로컬/개발 편의). 이미 주입된 운영 환경변수는 덮어쓰지 않음.
 try:
     from dotenv import load_dotenv  # type: ignore
 
-    load_dotenv()
+    load_dotenv(override=False)
 except Exception:
     pass
 
@@ -14,8 +14,26 @@ ALGORITHM = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 # Gemini (서버 전용 — 클라이언트에 노출 금지)
+# 모듈 import 시점 캐시 외에, 요청 시 get_gemini_api_key()로도 재조회한다.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+
+
+def get_gemini_api_key() -> str:
+    """Railway 등 런타임 환경변수를 우선해 매번 읽는다."""
+    for name in (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+    ):
+        value = (os.getenv(name) or "").strip()
+        if value:
+            return value
+    return (GEMINI_API_KEY or "").strip()
+
+
+def get_gemini_model() -> str:
+    return (os.getenv("GEMINI_MODEL") or GEMINI_MODEL or "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
 # RSS
 SECRET_RSS_TOKEN = os.getenv("SECRET_RSS_TOKEN", "rss-secret-token")

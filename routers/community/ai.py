@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+import settings
 from services.site_analysis import request_gemini_site_analysis
 
 router = APIRouter()
@@ -27,6 +28,22 @@ class SiteAnalysisOut(BaseModel):
     ok: bool = True
     analysis: Optional[str] = None
     error: Optional[str] = None
+
+
+class SiteAnalysisStatusOut(BaseModel):
+    ok: bool = True
+    gemini_configured: bool
+    model: str
+
+
+@router.get("/community/ai/site-analysis/status", response_model=SiteAnalysisStatusOut)
+def site_analysis_status():
+    """키 값 자체는 노출하지 않고, 설정 여부만 확인."""
+    return SiteAnalysisStatusOut(
+        ok=True,
+        gemini_configured=bool(settings.get_gemini_api_key()),
+        model=settings.get_gemini_model(),
+    )
 
 
 @router.post("/community/ai/site-analysis", response_model=SiteAnalysisOut)
