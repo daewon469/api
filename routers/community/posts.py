@@ -936,9 +936,114 @@ class PostsOut2(BaseModel):
     next_cursor: str | None = None
 
 
+def _split_csv_tokens(value: str | None) -> list[str]:
+    return [t.strip() for t in (value or "").split(",") if t.strip()]
+
+
+def _role_true_or_fee(use_col, fee_col):
+    return or_(
+        use_col.is_(True),
+        and_(fee_col.isnot(None), fee_col != ""),
+    )
+
+
+def _industry_filter_conditions(industries: list[str]):
+    cleaned = [str(x).strip() for x in industries if str(x).strip()]
+    if not cleaned or "전체" in cleaned:
+        return None
+    conds = []
+    for ind in cleaned:
+        conds.extend(
+            [
+                Community_Post.job_industry == ind,
+                Community_Post.job_industry.like(f"{ind},%"),
+                Community_Post.job_industry.like(f"%,{ind},%"),
+                Community_Post.job_industry.like(f"%,{ind}"),
+            ]
+        )
+    return or_(*conds) if conds else None
+
+
+def _region_filter_conditions(regions: list[str]):
+    cleaned = [str(x).strip() for x in regions if str(x).strip()]
+    if not cleaned or "전체" in cleaned:
+        return None
+    conds = []
+    for code in cleaned:
+        if code == "전국":
+            return None
+        parts = code.split()
+        if not parts:
+            continue
+        prov = parts[0]
+        city = "전체" if len(parts) == 1 else " ".join(parts[1:]).strip() or "전체"
+        if prov == "전체":
+            return None
+        prov_in = Community_Post.province.in_(province_candidates(prov))
+        if city == "전체":
+            conds.append(prov_in)
+        else:
+            conds.append(
+                and_(
+                    prov_in,
+                    or_(
+                        Community_Post.city == city,
+                        Community_Post.city.like(f"%{city}%"),
+                    ),
+                )
+            )
+    return or_(*conds) if conds else None
+
+
+def _role_filter_conditions(roles: list[str]):
+    cleaned = [str(x).strip() for x in roles if str(x).strip()]
+    if not cleaned:
+        return None
+    role_conds = []
+    if "총괄" in cleaned:
+        role_conds.append(_role_true_or_fee(Community_Post.total_use, Community_Post.total_fee))
+    if "본부장" in cleaned:
+        role_conds.append(_role_true_or_fee(Community_Post.branch_use, Community_Post.branch_fee))
+    if "팀장" in cleaned:
+        role_conds.append(
+            or_(
+                _role_true_or_fee(Community_Post.leader_use, Community_Post.leader_fee),
+                _role_true_or_fee(Community_Post.team_use, Community_Post.team_fee),
+            )
+        )
+    if "팀원" in cleaned:
+        role_conds.append(
+            or_(
+                _role_true_or_fee(Community_Post.member_use, Community_Post.member_fee),
+                _role_true_or_fee(Community_Post.each_use, Community_Post.each_fee),
+            )
+        )
+    if "기타" in cleaned:
+        role_conds.append(
+            and_(Community_Post.other_role_name.isnot(None), Community_Post.other_role_name != "")
+        )
+    return or_(*role_conds) if role_conds else None
+
+
+def _apply_custom_post_filters(q, industries: list[str], regions: list[str], roles: list[str]):
+    ind_conds = _industry_filter_conditions(industries)
+    if ind_conds is not None:
+        q = q.filter(ind_conds)
+    reg_conds = _region_filter_conditions(regions)
+    if reg_conds is not None:
+        q = q.filter(reg_conds)
+    role_conds = _role_filter_conditions(roles)
+    if role_conds is not None:
+        q = q.filter(role_conds)
+    return q
+
+
 @app.get("/community/posts/custom", response_model=PostsOut2)
 def list_posts_custom_by_user_settings(
     username: Optional[str] = Query(None, description="맞춤조건/좋아요 계산용 유저명"),
+    provinces: Optional[str] = Query(None, description="지역(쉼표구분, 축약형). 지정 시 유저 설정 대신 사용"),
+    industries: Optional[str] = Query(None, description="업종(쉼표구분). 지정 시 유저 설정 대신 사용"),
+    roles: Optional[str] = Query(None, description="모집(쉼표구분). 지정 시 유저 설정 대신 사용"),
     cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(120, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
@@ -948,20 +1053,38 @@ def list_posts_custom_by_user_settings(
     맞춤현장(유저 설정) 기반 구인글(post_type=1) 목록.
 
     - (B안) 토큰 인증 제거: username 파라미터로 유저 설정을 조회
+    - provinces/industries/roles 쿼리가 하나라도 있으면 해당 값으로 필터(맞춤보기 모달용)
     - 필터 기준:
-      - community_users.custom_industry_codes: job_industry(문자열/CSV)에 포함되는지 LIKE로 매칭
-      - community_users.custom_region_codes:
+      - custom_industry_codes / industries: job_industry CSV 토큰 매칭
+      - custom_region_codes / provinces:
         - "전체" 포함 시 지역 필터 없음
-        - "서울" => province="서울"
-        - "서울 강남구" => province="서울" AND city LIKE "%강남구%"
+        - "서울" => province="서울" 또는 "서울특별시"
+        - "서울 강남구" => province + city LIKE
     """
-    # 토큰 인증을 제거했으므로, username이 없으면 필터 조건을 알 수 없어 빈 목록 반환
-    if not username:
-        return PostsOut2(items=[], next_cursor=None)
+    use_override = provinces is not None or industries is not None or roles is not None
+    filter_industries: list[str] = []
+    filter_regions: list[str] = []
+    filter_roles: list[str] = []
 
-    user = db.query(Community_User).filter(Community_User.username == username).first()
-    if not user:
-        return PostsOut2(items=[], next_cursor=None)
+    if use_override:
+        filter_industries = _split_csv_tokens(industries)
+        filter_regions = _split_csv_tokens(provinces)
+        filter_roles = _split_csv_tokens(roles)
+    else:
+        if not username:
+            return PostsOut2(items=[], next_cursor=None)
+        user = db.query(Community_User).filter(Community_User.username == username).first()
+        if not user:
+            return PostsOut2(items=[], next_cursor=None)
+        filter_industries = [
+            str(x).strip() for x in (getattr(user, "custom_industry_codes", None) or []) if str(x).strip()
+        ]
+        filter_regions = [
+            str(x).strip() for x in (getattr(user, "custom_region_codes", None) or []) if str(x).strip()
+        ]
+        filter_roles = [
+            str(x).strip() for x in (getattr(user, "custom_role_codes", None) or []) if str(x).strip()
+        ]
 
     q = db.query(Community_Post).filter(Community_Post.post_type == 1).order_by(
         Community_Post.created_at.desc(), Community_Post.id.desc()
@@ -970,65 +1093,7 @@ def list_posts_custom_by_user_settings(
     if status in ("published", "closed"):
         q = q.filter(Community_Post.status == status)
 
-    # --- 산업(업종) 필터 ---
-    industries = [str(x).strip() for x in (getattr(user, "custom_industry_codes", None) or []) if str(x).strip()]
-    if industries and "전체" not in industries:
-        q = q.filter(or_(*[Community_Post.job_industry.ilike(f"%{ind}%") for ind in industries]))
-
-    # --- 지역 필터 ---
-    regions = [str(x).strip() for x in (getattr(user, "custom_region_codes", None) or []) if str(x).strip()]
-    if regions and "전체" not in regions:
-        conds = []
-        for code in regions:
-            parts = code.split()
-            if not parts:
-                continue
-            prov = parts[0]
-            city = "전체" if len(parts) == 1 else " ".join(parts[1:]).strip() or "전체"
-
-            if prov == "전체":
-                conds = []
-                break
-
-            prov_in = Community_Post.province.in_(province_candidates(prov))
-            if city == "전체":
-                conds.append(prov_in)
-            else:
-                conds.append(
-                    and_(
-                        prov_in,
-                        or_(
-                            Community_Post.city == city,
-                            Community_Post.city.like(f"%{city}%"),
-                        ),
-                    )
-                )
-
-        if conds:
-            q = q.filter(or_(*conds))
-
-    # --- 모집(역할) 필터 ---
-    # 저장 값(대표 5종):
-    # - "총괄" => total_use
-    # - "본부장" => branch_use(본부장)만
-    # - "팀장" => leader_use(팀장) OR team_use(팀)
-    # - "팀원" => member_use(팀원) OR each_use(각개)
-    # - "기타" => other_role_name 존재
-    roles = [str(x).strip() for x in (getattr(user, "custom_role_codes", None) or []) if str(x).strip()]
-    if roles:
-        role_conds = []
-        if "총괄" in roles:
-            role_conds.append(Community_Post.total_use.is_(True))
-        if "본부장" in roles:
-            role_conds.append(Community_Post.branch_use.is_(True))
-        if "팀장" in roles:
-            role_conds.append(or_(Community_Post.leader_use.is_(True), Community_Post.team_use.is_(True)))
-        if "팀원" in roles:
-            role_conds.append(or_(Community_Post.member_use.is_(True), Community_Post.each_use.is_(True)))
-        if "기타" in roles:
-            role_conds.append(and_(Community_Post.other_role_name.isnot(None), Community_Post.other_role_name != ""))
-        if role_conds:
-            q = q.filter(or_(*role_conds))
+    q = _apply_custom_post_filters(q, filter_industries, filter_regions, filter_roles)
 
     if cursor:
         cur_dt, cur_id = _parse_post_cursor_or_400(cursor)
