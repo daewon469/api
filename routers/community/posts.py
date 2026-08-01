@@ -1144,6 +1144,15 @@ def list_posts(
 
     if card_type is not None:
         q = q.filter(Community_Post.card_type == card_type)
+    else:
+        # 홈 피드: 슬라이드(5유형)는 별도 경로로 로드하므로 기본 목록에서 제외
+        # (NULL != 5 는 SQL에서 UNKNOWN이므로 IS NULL 포함 필수)
+        q = q.filter(
+            or_(
+                Community_Post.card_type.is_(None),
+                Community_Post.card_type != 5,
+            )
+        )
 
     # 지역 필터링 (서버 측)
     # - regions(복수)가 우선
