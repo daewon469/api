@@ -22,6 +22,7 @@ class SiteAnalysisIn(BaseModel):
     business_address: Optional[str] = None
     content: Optional[str] = None
     company_agency: Optional[str] = None
+    chapter_order: Optional[list[str]] = None
 
 
 class SiteAnalysisOut(BaseModel):
