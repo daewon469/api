@@ -99,6 +99,22 @@ class UIConfigSlidePosts(BaseModel):
     post_ids: List[int] = Field(default_factory=list, max_length=10)
 
 
+class UIConfigSlideMeshOpacity(BaseModel):
+    dark: float = Field(default=0.5, ge=0.1, le=1.0)
+    light: float = Field(default=0.5, ge=0.1, le=1.0)
+    navy: float = Field(default=0.5, ge=0.1, le=1.0)
+
+
+class UIConfigSlideMesh(BaseModel):
+    """
+    첫화면 5유형 슬라이드 카드 매쉬(오버레이) 색상·투명도.
+    - theme: dark(검은색) / navy(네이비) / light(화이트)
+    - opacity: 테마별 투명도(0.1~1.0, 0.05 단위 권장)
+    """
+    theme: Literal["dark", "light", "navy"] = "dark"
+    opacity: UIConfigSlideMeshOpacity = Field(default_factory=UIConfigSlideMeshOpacity)
+
+
 class UIConfigPayload(BaseModel):
     banner: UIConfigBanner = Field(default_factory=UIConfigBanner)
     top_banner: UIConfigTopBanner = Field(default_factory=UIConfigTopBanner)
@@ -108,6 +124,7 @@ class UIConfigPayload(BaseModel):
     ios_popup: UIConfigPopup = Field(default_factory=UIConfigPopup)
     title_search: UIConfigTitleSearch = Field(default_factory=UIConfigTitleSearch)
     slide_posts: UIConfigSlidePosts = Field(default_factory=UIConfigSlidePosts)
+    slide_mesh: UIConfigSlideMesh = Field(default_factory=UIConfigSlideMesh)
 
 
 def _default_popup_dict() -> dict:
@@ -188,7 +205,38 @@ def _default_ui_config_dict() -> dict:
         "slide_posts": {
             "post_ids": [],
         },
+        "slide_mesh": {
+            "theme": "dark",
+            "opacity": {"dark": 0.5, "light": 0.5, "navy": 0.5},
+        },
     }
+
+
+def _clamp_mesh_opacity(value: object, default: float = 0.5) -> float:
+    try:
+        n = float(value)  # type: ignore[arg-type]
+    except Exception:
+        n = default
+    if n != n:  # NaN
+        n = default
+    n = max(0.1, min(1.0, n))
+    # 0.05 단위로 반올림
+    return round(round(n / 0.05) * 0.05, 2)
+
+
+def _normalize_slide_mesh(raw: dict | None, base: dict | None = None) -> dict:
+    out = dict(base or {"theme": "dark", "opacity": {"dark": 0.5, "light": 0.5, "navy": 0.5}})
+    src = raw if isinstance(raw, dict) else {}
+    theme = str(src.get("theme", out["theme"])).strip().lower()
+    out["theme"] = theme if theme in ("dark", "light", "navy") else "dark"
+    op_src = src.get("opacity") if isinstance(src.get("opacity"), dict) else {}
+    op_base = out.get("opacity") if isinstance(out.get("opacity"), dict) else {}
+    out["opacity"] = {
+        "dark": _clamp_mesh_opacity(op_src.get("dark", op_base.get("dark", 0.5))),
+        "light": _clamp_mesh_opacity(op_src.get("light", op_base.get("light", 0.5))),
+        "navy": _clamp_mesh_opacity(op_src.get("navy", op_base.get("navy", 0.5))),
+    }
+    return out
 
 
 def _normalize_ui_config(raw: dict | None) -> dict:
@@ -201,6 +249,7 @@ def _normalize_ui_config(raw: dict | None) -> dict:
     ios_popup = raw.get("ios_popup") if isinstance(raw.get("ios_popup"), dict) else {}
     title_search = raw.get("title_search") if isinstance(raw.get("title_search"), dict) else {}
     slide_posts = raw.get("slide_posts") if isinstance(raw.get("slide_posts"), dict) else {}
+    slide_mesh = raw.get("slide_mesh") if isinstance(raw.get("slide_mesh"), dict) else {}
 
     base["banner"]["enabled"] = bool(banner.get("enabled", base["banner"]["enabled"]))
     try:
@@ -523,6 +572,9 @@ def _normalize_ui_config(raw: dict | None) -> dict:
         if len(uniq_slide_ids) >= SLIDE_CARD_MAX:
             break
     base["slide_posts"]["post_ids"] = uniq_slide_ids
+
+    # slide_mesh: 5유형 카드 매쉬 색상/투명도
+    base["slide_mesh"] = _normalize_slide_mesh(slide_mesh, base["slide_mesh"])
     return base
 
 
