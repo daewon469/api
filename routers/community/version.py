@@ -9,10 +9,8 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-# 최소 지원 버전(하드코딩)
-# - 운영에서 .env 누락/오타로 의도치 않게 min_supported가 비는 것을 방지합니다.
-# - 최신 버전(latest)은 환경변수로 계속 제어할 수 있습니다.
-HARD_MIN_SUPPORTED_VERSION = "1.1.2"
+# SOFTWARE_VERSION 환경변수가 비었을 때만 사용
+HARD_VERSION = "1.1.2"
 
 
 class AppVersionOut(BaseModel):
@@ -27,19 +25,14 @@ class AppVersionOut(BaseModel):
 
 
 def _version_parts(v: str) -> List[int]:
-    """
-    "1.2.3" 형태 버전을 비교 가능한 숫자 배열로 변환합니다.
-    - 숫자 이외 문자는 무시(예: "1.0.0-beta" -> 1.0.0)
-    """
+    """'1.2.3' 형태 버전을 비교 가능한 숫자 배열로 변환."""
     s = (v or "").strip()
     if not s:
         return [0]
-    parts = s.split(".")
     nums: List[int] = []
-    for p in parts:
+    for p in s.split("."):
         m = re.match(r"(\d+)", (p or "").strip())
         nums.append(int(m.group(1)) if m else 0)
-    # trailing 0 정리(1.0.0 == 1)
     while len(nums) > 1 and nums[-1] == 0:
         nums.pop()
     return nums or [0]
@@ -59,6 +52,11 @@ def _is_version_lt(a: str, b: str) -> bool:
     return False
 
 
+def _resolved_version() -> str:
+    """SOFTWARE_VERSION → HARD_VERSION 순으로 최신=최소 버전 결정."""
+    return (os.getenv("SOFTWARE_VERSION", "") or "").strip() or HARD_VERSION
+
+
 @router.get("/community/app/version", response_model=AppVersionOut)
 def community_app_version(
     platform: Literal["android", "ios"] = Query(...),
@@ -66,53 +64,36 @@ def community_app_version(
 ):
     """
     앱 시작 시 버전 체크(강제 업데이트용).
-    - 최신 버전이 아니면 force_update=True
+    - SOFTWARE_VERSION 이 곧 최신·최소 버전 (android/ios 공통)
+    - SOFTWARE_VERSION 이 비면 HARD_VERSION 사용
+    - current_version < SOFTWARE_VERSION 이면 force_update=True
+
     환경변수:
-      - APP_ANDROID_LATEST_VERSION / APP_ANDROID_MIN_SUPPORTED_VERSION / APP_ANDROID_STORE_URL / APP_ANDROID_PACKAGE
-      - APP_IOS_LATEST_VERSION / APP_IOS_MIN_SUPPORTED_VERSION / APP_IOS_STORE_URL
+      - SOFTWARE_VERSION
+      - APP_ANDROID_STORE_URL / APP_ANDROID_PACKAGE
+      - APP_IOS_STORE_URL
       - APP_FORCE_UPDATE_MESSAGE
     """
-    msg = (os.getenv("APP_FORCE_UPDATE_MESSAGE", "") or "").strip() or "최신 버전으로 업데이트 후 이용해 주세요."
+    version = _resolved_version()
+    msg = (os.getenv("APP_FORCE_UPDATE_MESSAGE", "") or "").strip() or (
+        "최신 버전으로 업데이트 후 이용해 주세요."
+    )
 
     if platform == "android":
-        latest = (os.getenv("APP_ANDROID_LATEST_VERSION", "") or "").strip()
-        min_supported = (os.getenv("APP_ANDROID_MIN_SUPPORTED_VERSION", "") or "").strip() or HARD_MIN_SUPPORTED_VERSION
         pkg = (os.getenv("APP_ANDROID_PACKAGE", "") or "").strip() or "com.smartgauge.bunyangpro"
         store_url = (os.getenv("APP_ANDROID_STORE_URL", "") or "").strip() or f"market://details?id={pkg}"
     else:
-        latest = (os.getenv("APP_IOS_LATEST_VERSION", "") or "").strip()
-        min_supported = (os.getenv("APP_IOS_MIN_SUPPORTED_VERSION", "") or "").strip() or HARD_MIN_SUPPORTED_VERSION
         store_url = (os.getenv("APP_IOS_STORE_URL", "") or "").strip() or None
 
-    # 값이 비어있으면 안전한 기본값으로 보정
-    # - 운영에서 환경변수 설정이 누락되면, 의도치 않게 전 사용자 강제업데이트가 걸릴 수 있어
-    #   기본값은 "현재 버전 == 최신"으로 간주합니다.
-    if not latest and not min_supported:
-        latest = current_version or "0.0.0"
-        min_supported = latest
-    else:
-        latest = latest or min_supported
-        min_supported = min_supported or latest
-
-    # 하드코딩된 최소 지원 버전이 최신 버전보다 높으면 최신을 최소로 끌어올림
-    # (client에서 latest를 기준으로 비교하는 로직과의 일관성 유지)
-    if _is_version_lt(latest, min_supported):
-        latest = min_supported
-
-    force_update = False
-    if current_version:
-        # 요구사항: 최신 버전이 아니면 강제 업데이트
-        if _is_version_lt(current_version, latest):
-            force_update = True
+    force_update = bool(current_version and _is_version_lt(current_version, version))
 
     return {
         "status": 0,
         "platform": platform,
         "current_version": current_version,
-        "latest_version": latest,
-        "min_supported_version": min_supported,
+        "latest_version": version,
+        "min_supported_version": version,
         "force_update": force_update,
         "store_url": store_url,
         "message": msg,
     }
-
