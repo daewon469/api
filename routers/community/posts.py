@@ -208,6 +208,8 @@ class PostCreate(BaseModel):
     other_role_fee: Optional[str] = None
     post_type: Optional[float] = None
     card_type: Optional[float] = None
+    reward_point_amount: Optional[int] = None
+    is_event: Optional[bool] = None
 
 
 class PostAuthor(BaseModel):
@@ -285,6 +287,8 @@ class PostOut(BaseModel):
     other_role_fee: Optional[str] = None
     post_type: Optional[float] = None
     card_type: Optional[float] = None
+    reward_point_amount: Optional[int] = None
+    is_event: Optional[bool] = None
 
 
 class PostOut2(BaseModel):
@@ -357,6 +361,8 @@ class PostOut2(BaseModel):
     other_role_fee: Optional[str] = None
     post_type: Optional[float] = None
     card_type: Optional[float] = None
+    reward_point_amount: Optional[int] = None
+    is_event: Optional[bool] = None
 
 
 class PostsOut(BaseModel):
@@ -430,6 +436,8 @@ class PostUpdate(BaseModel):
     agent: Optional[str] = None
     post_type: Optional[float] = None
     card_type: Optional[float] = None
+    reward_point_amount: Optional[int] = None
+    is_event: Optional[bool] = None
 
 
 # -------------------- Comments --------------------
@@ -590,6 +598,16 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         other_role_fee=body.other_role_fee,
         post_type=1,
         card_type=card_type,
+        reward_point_amount=(
+            int(body.reward_point_amount)
+            if bool(getattr(user, "is_owner", False)) and body.reward_point_amount is not None
+            else None
+        ),
+        is_event=(
+            bool(body.is_event)
+            if bool(getattr(user, "is_owner", False)) and body.is_event is not None
+            else None
+        ),
     )
 
     # ---- 구인글 작성 시각 갱신(하루 1회 제한/통계용) ----
@@ -689,6 +707,8 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         other_role_fee=getattr(post, "other_role_fee", None),
         post_type=post.post_type,
         card_type=post.card_type,
+        reward_point_amount=getattr(post, "reward_point_amount", None),
+        is_event=getattr(post, "is_event", None),
     )
 
 
@@ -928,6 +948,8 @@ def create_post_plus(post_type: int, username: str, body: PostCreate, db: Sessio
         other_role_fee=getattr(post, "other_role_fee", None),
         post_type=post.post_type,
         card_type=post.card_type,
+        reward_point_amount=getattr(post, "reward_point_amount", None),
+        is_event=getattr(post, "is_event", None),
     )
 
 
@@ -1281,6 +1303,8 @@ def list_posts(
             other_role_fee=getattr(p, "other_role_fee", None),
             post_type=p.post_type,
             card_type=p.card_type,
+            reward_point_amount=getattr(p, "reward_point_amount", None),
+            is_event=getattr(p, "is_event", None),
         )
         for p in rows
     ]
@@ -1408,6 +1432,8 @@ def search_posts_by_title(
             other_role_fee=getattr(p, "other_role_fee", None),
             post_type=p.post_type,
             card_type=p.card_type,
+            reward_point_amount=getattr(p, "reward_point_amount", None),
+            is_event=getattr(p, "is_event", None),
         )
         for p in rows
     ]
@@ -1564,6 +1590,8 @@ def list_posts_plus(
             other_role_fee=getattr(p, "other_role_fee", None),
             post_type=p.post_type,
             card_type=p.card_type,
+            reward_point_amount=getattr(p, "reward_point_amount", None),
+            is_event=getattr(p, "is_event", None),
         )
         for p in rows
     ]
@@ -1579,16 +1607,32 @@ def list_my_posts_by_type(
     cursor: Optional[str] = Query(None, description="커서: created_at__id"),
     limit: int = Query(1000, ge=1, le=1000),
     status: Optional[str] = Query(None, description="published | closed"),
+    scope: Optional[str] = Query(
+        None,
+        description="mine | owners | all (owners/all 은 is_owner 만)",
+    ),
     db: Session = Depends(get_db),
 ):
-    user_id = get_user_id_by_username(db, username)
+    user = db.query(Community_User).filter(Community_User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Invalid username")
+    user_id = int(user.id)
+    is_owner = bool(getattr(user, "is_owner", False))
+
     q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(
         Community_Post.created_at.desc(), Community_Post.id.desc()
     )
 
-    super_users = {1, 10, 13, 20, 21, 22, 23, 24, 25, 26, 27, 28}
-
-    if user_id not in super_users:
+    # 기본: 본인 글만. 오너는 scope로 오너작성글/전체작성글 전환
+    normalized_scope = (scope or "").strip().lower()
+    if is_owner and normalized_scope in ("all", "owners"):
+        if normalized_scope == "owners":
+            q = q.filter(
+                Community_Post.user_id.in_(
+                    db.query(Community_User.id).filter(Community_User.is_owner.is_(True))
+                )
+            )
+    else:
         q = q.filter(Community_Post.user_id == user_id)
 
     if status in ("published", "closed"):
@@ -1681,6 +1725,8 @@ def list_my_posts_by_type(
             other_role_fee=getattr(p, "other_role_fee", None),
             post_type=p.post_type,
             card_type=p.card_type,
+            reward_point_amount=getattr(p, "reward_point_amount", None),
+            is_event=getattr(p, "is_event", None),
         )
         for p in rows
     ]
@@ -1901,6 +1947,8 @@ def recreate_recruit_post(
         other_role_fee=getattr(src, "other_role_fee", None),
         post_type=1,
         card_type=1,
+        reward_point_amount=getattr(src, "reward_point_amount", None),
+        is_event=getattr(src, "is_event", None),
     )
 
     # ---- 구인글 작성 시각 갱신(하루 1회 제한/통계용) ----
@@ -1998,6 +2046,8 @@ def recreate_recruit_post(
         other_role_fee=getattr(post, "other_role_fee", None),
         post_type=post.post_type,
         card_type=post.card_type,
+        reward_point_amount=getattr(post, "reward_point_amount", None),
+        is_event=getattr(post, "is_event", None),
     )
 
 
@@ -2011,7 +2061,14 @@ def update_post(
     if not post:
         raise HTTPException(status_code=404, detail="게시글을 찾을 수 없습니다.")
 
-    for key, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    # 지급 포인트/이벤트는 오너만 변경 가능
+    author = getattr(post, "author", None)
+    if not bool(getattr(author, "is_owner", False)):
+        data.pop("reward_point_amount", None)
+        data.pop("is_event", None)
+
+    for key, value in data.items():
         setattr(post, key, value)
 
     db.flush()
@@ -2101,6 +2158,8 @@ def update_post(
         other_role_fee=getattr(post, "other_role_fee", None),
         post_type=post.post_type,
         card_type=post.card_type,
+        reward_point_amount=getattr(post, "reward_point_amount", None),
+        is_event=getattr(post, "is_event", None),
     )
 
 

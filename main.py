@@ -59,6 +59,7 @@ bearer = HTTPBearer(auto_error=True)
 
 import settings
 from routers.internal import register_rss_startup, router as internal_router
+from routers.community.signup_rewards import register_signup_reward_startup
 from routers.notify import create_notification, get_user_id_by_username, router as notify_router, send_push
 from routers.payments import router as payments_router
 from routers.upload import mount_static, router as upload_router
@@ -88,6 +89,7 @@ app.include_router(community_router)
 app.include_router(admin_migration_uploads_router)
 
 register_rss_startup(app)
+register_signup_reward_startup(app)
 
 from routers.community.logic import (
     AD_CARD1_MAX,

@@ -26,6 +26,7 @@ def ensure_schema() -> None:
 
     _ensure_community_users_columns_and_indexes()
     _ensure_community_posts_columns()
+    _ensure_pending_signup_rewards_table()
     _ensure_phone_table()
     _ensure_community_user_restrictions_table()
 
@@ -214,12 +215,54 @@ def _ensure_community_posts_columns() -> None:
                       ADD COLUMN IF NOT EXISTS post_type double precision NULL,
                       ADD COLUMN IF NOT EXISTS card_type double precision NULL,
 
+                      ADD COLUMN IF NOT EXISTS reward_point_amount integer NULL,
+                      ADD COLUMN IF NOT EXISTS is_event boolean NULL,
+
                       ADD COLUMN IF NOT EXISTS status varchar(20) NOT NULL DEFAULT 'published';
                     """
                 )
             )
     except Exception as e:
         print(f"[WARN] ensure community_posts columns failed: {e}")
+
+
+def _ensure_pending_signup_rewards_table() -> None:
+    """회원가입 포인트 비동기 큐 테이블 생성."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS public.pending_signup_rewards (
+                      id bigserial PRIMARY KEY,
+                      user_id integer NOT NULL,
+                      referral_code_input varchar(20) NULL,
+                      phone_already_saved boolean NOT NULL DEFAULT false,
+                      status varchar(20) NOT NULL DEFAULT 'pending',
+                      error_message text NULL,
+                      created_at timestamptz NOT NULL DEFAULT now(),
+                      processed_at timestamptz NULL
+                    );
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_pending_signup_rewards_user_id ON public.pending_signup_rewards (user_id);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_pending_signup_rewards_status ON public.pending_signup_rewards (status);"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_pending_signup_rewards_status_created ON public.pending_signup_rewards (status, created_at);"
+                )
+            )
+    except Exception as e:
+        print(f"[WARN] ensure pending_signup_rewards table failed: {e}")
 
 
 def _ensure_phone_table() -> None:

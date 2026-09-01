@@ -274,8 +274,8 @@ def referral_status_detail_by_date(date: str, db: Session = Depends(get_db)):
     """
     추천 현황(특정 날짜 상세).
     - date: YYYY-MM-DD
-    - 반환 items: (추천 받은 회원 username, 추천한 회원 username, 추천 받은 회원의 전화번호, 추천 받은 날짜)
-      -> (A_username, B_username, A_phone_number, date)
+    - 반환 items: (추천 받은 회원 username, 추천한 회원 username, 전화번호, 날짜)
+      -> 탈퇴(삭제)된 회원도 LEFT JOIN으로 포함하며, username은 "(탈퇴 #id)" 로 표시
     """
     d = (date or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
@@ -284,28 +284,47 @@ def referral_status_detail_by_date(date: str, db: Session = Depends(get_db)):
     try:
         sql = """
 SELECT
+  r.referred_user_id AS "A_user_id",
+  r.referrer_user_id AS "B_user_id",
   a.username AS "A_username",
   b.username AS "B_username",
   a.phone_number AS "A_phone_number",
   b.phone_number AS "B_phone_number",
+  (a.id IS NULL) AS "A_withdrawn",
+  (b.id IS NULL) AS "B_withdrawn",
   to_char(((r.created_at AT TIME ZONE 'Asia/Seoul')::date), 'YYYY-MM-DD') AS date
 FROM referral r
-JOIN community_users a ON a.id::bigint = r.referred_user_id
-JOIN community_users b ON b.id::bigint = r.referrer_user_id
+LEFT JOIN community_users a ON a.id::bigint = r.referred_user_id
+LEFT JOIN community_users b ON b.id::bigint = r.referrer_user_id
 WHERE ((r.created_at AT TIME ZONE 'Asia/Seoul')::date) = (:date)::date
 ORDER BY r.created_at DESC, r.id DESC
 """
         rows = db.execute(text(sql), {"date": d}).fetchall()
-        items = [
-            {
-                "A_username": getattr(r, "A_username", None),
-                "B_username": getattr(r, "B_username", None),
-                "A_phone_number": getattr(r, "A_phone_number", None),
-                "B_phone_number": getattr(r, "B_phone_number", None),
-                "date": str(getattr(r, "date", "") or d),
-            }
-            for r in rows
-        ]
+        items = []
+        for r in rows:
+            a_uid = getattr(r, "A_user_id", None)
+            b_uid = getattr(r, "B_user_id", None)
+            a_withdrawn = bool(getattr(r, "A_withdrawn", False))
+            b_withdrawn = bool(getattr(r, "B_withdrawn", False))
+            a_name = getattr(r, "A_username", None)
+            b_name = getattr(r, "B_username", None)
+            if a_withdrawn or not a_name:
+                a_name = f"(탈퇴 #{a_uid})" if a_uid is not None else "(탈퇴)"
+            if b_withdrawn or not b_name:
+                b_name = f"(탈퇴 #{b_uid})" if b_uid is not None else "(탈퇴)"
+            items.append(
+                {
+                    "A_username": a_name,
+                    "B_username": b_name,
+                    "A_phone_number": getattr(r, "A_phone_number", None),
+                    "B_phone_number": getattr(r, "B_phone_number", None),
+                    "A_user_id": int(a_uid) if a_uid is not None else None,
+                    "B_user_id": int(b_uid) if b_uid is not None else None,
+                    "A_withdrawn": a_withdrawn,
+                    "B_withdrawn": b_withdrawn,
+                    "date": str(getattr(r, "date", "") or d),
+                }
+            )
         return {"status": 0, "items": items}
     except Exception:
         try:

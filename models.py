@@ -218,7 +218,10 @@ class Community_Post(Base):
     other_role_name = Column(String(255))
     other_role_fee = Column(String(255))
     post_type= Column(DOUBLE_PRECISION, nullable=True)   
-    card_type= Column(DOUBLE_PRECISION, nullable=True)                 
+    card_type= Column(DOUBLE_PRECISION, nullable=True)
+    # 구인등록: 지급 포인트 / 이벤트 여부 (오너 설정)
+    reward_point_amount = Column(Integer, nullable=True)
+    is_event = Column(Boolean, nullable=True)
 
     author = relationship("Community_User", foreign_keys=[user_id], lazy="joined")
     comments = relationship("Community_Comment", back_populates="post", cascade="all, delete-orphan")
@@ -305,6 +308,27 @@ class Point(Base):
 
     __table_args__ = (
         Index("idx_point_ledger_user_time", "user_id", "created_at"),
+    )
+
+
+class PendingSignupReward(Base):
+    """
+    회원가입 포인트/추천인 보상 비동기 처리 큐.
+    - 가입 요청에서는 유저 생성만 빠르게 커밋하고, 포인트 지급은 스케줄러가 처리
+    """
+    __tablename__ = "pending_signup_rewards"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    referral_code_input = Column(String(20), nullable=True)
+    phone_already_saved = Column(Boolean, nullable=False, server_default="false")
+    status = Column(String(20), nullable=False, server_default="pending", index=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
+    processed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_pending_signup_rewards_status_created", "status", "created_at"),
     )
 
 

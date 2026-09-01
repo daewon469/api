@@ -7,8 +7,6 @@ from datetime import date, datetime, timedelta, timezone
 import jwt
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 import settings
@@ -16,16 +14,18 @@ from deps import get_db
 from models import (
     Community_Phone_Verification,
     Community_User,
-    Notification,
+    PendingSignupReward,
     Phone,
-    Point,
-    Referral,
 )
 
-from .logic import _apply_user_grade_upgrade
 from .notifications import notify_admin_acknowledged_event
 from .phone import _is_valid_korean_phone, _normalize_phone
 from .referral_code import assign_referral_code
+from .signup_rewards import (
+    REFERRAL_BONUS_REFERRED,
+    REFERRAL_BONUS_REFERRER,
+    SIGNUP_BONUS,
+)
 
 router = APIRouter()
 
@@ -161,27 +161,16 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     if not phone_already_saved:
         db.add(Phone(phone=digits))
 
-    SIGNUP_BONUS = 500
-    REFERRAL_BONUS_REFERRED = 1000 # - 타인의 의해 추천받은 회원
-    REFERRAL_BONUS_REFERRER = 5000  # - 추천하고 가입한 회원
     signup_bonus_amount = 0
     referral_bonus_referred_amount = 0
     referral_bonus_referrer_amount = 0
 
     input_code = (req.referral_code or "").strip()
 
-    # 정책:
-    # - 추천인코드 미기입 시에만 가입 포인트 500P 지급
-    # - 추천인코드 기입 + (phone 테이블에 없는 번호)일 때만 추천인 시스템(추천인 5000P / 피추천인 1000P) 적용
-    # - 추천인코드 기입했더라도, phone 테이블에 이미 저장된 번호면 추천인 시스템은 "완전 미적용"(코드 검증/포인트/원장/알림 모두 스킵)
+    # 추천인코드 검증만 동기 수행(포인트 지급은 스케줄러로 분리해 가입 응답 부하 감소)
     if not input_code:
         signup_bonus_amount = SIGNUP_BONUS
-        user.point_balance = int(user.point_balance or 0) + SIGNUP_BONUS
-        db.add(Point(user_id=user.id, reason="signup_bonus", amount=SIGNUP_BONUS))
-
-    # 추천인코드가 있을 때: phone 중복이면 "추천인 시스템 완전 미적용"
-    if input_code and (not phone_already_saved):
-        # 본인 코드로 추천 방지(가입 직후 생성된 코드와 동일할 가능성도 있어 체크)
+    elif not phone_already_saved:
         if user.referral_code and input_code == user.referral_code:
             db.rollback()
             return {"status": 6, "detail": "본인 추천인코드는 사용할 수 없습니다."}
@@ -191,77 +180,17 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
             db.rollback()
             return {"status": 6, "detail": "추천인코드가 올바르지 않습니다."}
 
-        try:
-            db.add(
-                Referral(
-                    referrer_user_id=referrer.id,
-                    referred_user_id=user.id,
-                    referrer_code=input_code,
-                )
-            )
-            db.flush()  # 아래 추천인 수 집계에 방금 추가한 Referral이 포함되도록
+        referral_bonus_referred_amount = REFERRAL_BONUS_REFERRED
+        referral_bonus_referrer_amount = REFERRAL_BONUS_REFERRER
 
-            referred_bonus = int(REFERRAL_BONUS_REFERRED)
-            referrer_bonus = int(REFERRAL_BONUS_REFERRER)
-            referral_bonus_referred_amount = referred_bonus
-            referral_bonus_referrer_amount = referrer_bonus
-
-            # 추천인 포인트 적립
-            referrer.point_balance = int(referrer.point_balance or 0) + referrer_bonus
-            db.add(
-                Point(
-                    user_id=referrer.id,
-                    reason="referral_bonus_referrer",
-                    amount=referrer_bonus,
-                )
-            )
-
-            # --- 추천인 수 기반 자동 등급 동기화(등급 상승 시 보상 지급) ---
-            ref_cnt = db.query(func.count(Referral.id)).filter(Referral.referrer_user_id == referrer.id).scalar() or 0
-            _apply_user_grade_upgrade(db, referrer, int(ref_cnt))
-
-            # 피추천인 포인트 적립
-            user.point_balance = int(user.point_balance or 0) + referred_bonus
-            db.add(
-                Point(
-                    user_id=user.id,
-                    reason="referral_bonus_referred",
-                    amount=referred_bonus,
-                )
-            )
-
-            # 추천인에게 "미확인 알림" 누적(앱 실행 시 Alert로 보여주기 위함)
-            db.add(
-                Notification(
-                    user_id=int(referrer.id),
-                    type="referral",
-                    title="추천인 가입 포인트 지급",
-                    body=f"{user.username}님이 추천인코드로 가입하여 {referrer_bonus}점이 지급되었습니다.",
-                    data={
-                        "referred_username": user.username,
-                        "amount": referrer_bonus,
-                        "reason": "referral_bonus_referrer",
-                    },
-                    is_read=False,
-                )
-            )
-
-        except IntegrityError as e:
-            # 사용자 요청에 따라 referral/point 테이블 제약조건을 제거하므로
-            # 여기서는 "1회 제한" 같은 메시지를 내지 않고, DB 오류로만 처리합니다.
-            db.rollback()
-
-            pgcode = getattr(getattr(e, "orig", None), "pgcode", None)
-
-            # FK violation (23503): 대부분 referral/point 테이블 FK가 users(id)를 참조하는데
-            # 앱은 community_users(id)를 넣는 경우 발생
-            if pgcode == "23503":
-                return {
-                    "status": 8,
-                    "detail": "DB 제약조건(FK) 오류로 추천인 포인트 지급에 실패했습니다. referral/point 테이블 FK가 community_users(id)를 참조하는지 확인해주세요.",
-                }
-
-            return {"status": 8, "detail": "추천인 처리 중 DB 오류가 발생했습니다."}
+    db.add(
+        PendingSignupReward(
+            user_id=int(user.id),
+            referral_code_input=input_code or None,
+            phone_already_saved=bool(phone_already_saved),
+            status="pending",
+        )
+    )
 
     db.commit()
 
@@ -285,6 +214,7 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
         "signup_bonus_amount": signup_bonus_amount,
         "referral_bonus_referred_amount": referral_bonus_referred_amount,
         "referral_bonus_referrer_amount": referral_bonus_referrer_amount,
+        "reward_pending": True,
     }
 
 
