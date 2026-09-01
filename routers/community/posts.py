@@ -598,17 +598,21 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         other_role_fee=body.other_role_fee,
         post_type=1,
         card_type=card_type,
-        reward_point_amount=(
-            int(body.reward_point_amount)
-            if bool(getattr(user, "is_owner", False)) and body.reward_point_amount is not None
-            else None
-        ),
-        is_event=(
-            bool(body.is_event)
-            if bool(getattr(user, "is_owner", False)) and body.is_event is not None
-            else None
-        ),
     )
+
+    # 오너메뉴 구인등록 이벤트 설정을 신규 구인글에 자동 반영
+    try:
+        from models import Community_UI_Config
+        from .ui_config import _normalize_ui_config
+
+        ui_row = db.query(Community_UI_Config).filter(Community_UI_Config.id == 1).first()
+        ui_cfg = _normalize_ui_config(getattr(ui_row, "config", None) if ui_row else None)
+        ev = ui_cfg.get("recruit_event") if isinstance(ui_cfg, dict) else {}
+        if isinstance(ev, dict):
+            post.reward_point_amount = max(0, int(ev.get("reward_point_amount") or 0))
+            post.is_event = bool(ev.get("enabled", False))
+    except Exception:
+        pass
 
     # ---- 구인글 작성 시각 갱신(하루 1회 제한/통계용) ----
     user.last_recruit_posted_at = now_utc
@@ -1950,6 +1954,20 @@ def recreate_recruit_post(
         reward_point_amount=getattr(src, "reward_point_amount", None),
         is_event=getattr(src, "is_event", None),
     )
+
+    # 현재 구인등록 이벤트 설정이 있으면 재등록 글에도 반영
+    try:
+        from models import Community_UI_Config
+        from .ui_config import _normalize_ui_config
+
+        ui_row = db.query(Community_UI_Config).filter(Community_UI_Config.id == 1).first()
+        ui_cfg = _normalize_ui_config(getattr(ui_row, "config", None) if ui_row else None)
+        ev = ui_cfg.get("recruit_event") if isinstance(ui_cfg, dict) else {}
+        if isinstance(ev, dict):
+            post.reward_point_amount = max(0, int(ev.get("reward_point_amount") or 0))
+            post.is_event = bool(ev.get("enabled", False))
+    except Exception:
+        pass
 
     # ---- 구인글 작성 시각 갱신(하루 1회 제한/통계용) ----
     user.last_recruit_posted_at = now_utc

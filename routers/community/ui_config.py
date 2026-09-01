@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from deps import get_db
-from models import Community_UI_Config
+from models import Community_Post, Community_UI_Config
 from .logic import (
     SLIDE_CARD_MAX,
     _rollover_recruit_and_slide_card_types,
@@ -115,6 +115,16 @@ class UIConfigSlideMesh(BaseModel):
     opacity: UIConfigSlideMeshOpacity = Field(default_factory=UIConfigSlideMeshOpacity)
 
 
+class UIConfigRecruitEvent(BaseModel):
+    """
+    구인등록 이벤트(오너 일괄 설정).
+    - enabled: 이벤트 여부
+    - reward_point_amount: 지급 포인트 금액
+    """
+    enabled: bool = False
+    reward_point_amount: int = Field(default=0, ge=0)
+
+
 class UIConfigPayload(BaseModel):
     banner: UIConfigBanner = Field(default_factory=UIConfigBanner)
     top_banner: UIConfigTopBanner = Field(default_factory=UIConfigTopBanner)
@@ -125,6 +135,7 @@ class UIConfigPayload(BaseModel):
     title_search: UIConfigTitleSearch = Field(default_factory=UIConfigTitleSearch)
     slide_posts: UIConfigSlidePosts = Field(default_factory=UIConfigSlidePosts)
     slide_mesh: UIConfigSlideMesh = Field(default_factory=UIConfigSlideMesh)
+    recruit_event: UIConfigRecruitEvent = Field(default_factory=UIConfigRecruitEvent)
 
 
 def _default_popup_dict() -> dict:
@@ -209,6 +220,10 @@ def _default_ui_config_dict() -> dict:
             "theme": "dark",
             "opacity": {"dark": 0.5, "light": 0.5, "navy": 0.5},
         },
+        "recruit_event": {
+            "enabled": False,
+            "reward_point_amount": 0,
+        },
     }
 
 
@@ -250,6 +265,7 @@ def _normalize_ui_config(raw: dict | None) -> dict:
     title_search = raw.get("title_search") if isinstance(raw.get("title_search"), dict) else {}
     slide_posts = raw.get("slide_posts") if isinstance(raw.get("slide_posts"), dict) else {}
     slide_mesh = raw.get("slide_mesh") if isinstance(raw.get("slide_mesh"), dict) else {}
+    recruit_event = raw.get("recruit_event") if isinstance(raw.get("recruit_event"), dict) else {}
 
     base["banner"]["enabled"] = bool(banner.get("enabled", base["banner"]["enabled"]))
     try:
@@ -575,7 +591,74 @@ def _normalize_ui_config(raw: dict | None) -> dict:
 
     # slide_mesh: 5유형 카드 매쉬 색상/투명도
     base["slide_mesh"] = _normalize_slide_mesh(slide_mesh, base["slide_mesh"])
+
+    # recruit_event: 구인등록 이벤트 일괄 설정
+    base["recruit_event"]["enabled"] = bool(
+        recruit_event.get("enabled", base["recruit_event"]["enabled"])
+    )
+    try:
+        amount = int(
+            recruit_event.get("reward_point_amount", base["recruit_event"]["reward_point_amount"])
+        )
+    except Exception:
+        amount = 0
+    base["recruit_event"]["reward_point_amount"] = max(0, amount)
     return base
+
+
+class RecruitEventApplyBody(BaseModel):
+    enabled: bool = False
+    reward_point_amount: int = Field(default=0, ge=0)
+
+
+@router.put("/community/admin/recruit-event")
+def community_apply_recruit_event(body: RecruitEventApplyBody, db: Session = Depends(get_db)):
+    """
+    구인등록 이벤트 설정 저장 + 기존 구인글(post_type=1)에 일괄 적용.
+    """
+    try:
+        row = (
+            db.query(Community_UI_Config)
+            .filter(Community_UI_Config.id == 1)
+            .with_for_update()
+            .first()
+        )
+        existing = _normalize_ui_config(getattr(row, "config", None) if row else None)
+        existing["recruit_event"] = {
+            "enabled": bool(body.enabled),
+            "reward_point_amount": max(0, int(body.reward_point_amount or 0)),
+        }
+        cfg_dict = _normalize_ui_config(existing)
+        if not row:
+            row = Community_UI_Config(id=1, config=cfg_dict)
+            db.add(row)
+        else:
+            row.config = cfg_dict
+            db.add(row)
+
+        amount = int(cfg_dict["recruit_event"]["reward_point_amount"])
+        enabled = bool(cfg_dict["recruit_event"]["enabled"])
+        updated = (
+            db.query(Community_Post)
+            .filter(Community_Post.post_type == 1)
+            .update(
+                {
+                    Community_Post.reward_point_amount: amount,
+                    Community_Post.is_event: enabled,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        db.refresh(row)
+        return {
+            "status": 0,
+            "updated_count": int(updated or 0),
+            "config": _normalize_ui_config(getattr(row, "config", None)),
+        }
+    except Exception:
+        db.rollback()
+        return {"status": 8, "updated_count": 0, "config": _default_ui_config_dict()}
 
 
 @router.get("/community/ui-config")
