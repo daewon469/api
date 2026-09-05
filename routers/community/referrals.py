@@ -275,7 +275,7 @@ def referral_status_detail_by_date(date: str, db: Session = Depends(get_db)):
     추천 현황(특정 날짜 상세).
     - date: YYYY-MM-DD
     - 반환 items: (추천 받은 회원 username, 추천한 회원 username, 전화번호, 날짜)
-      -> 탈퇴(삭제)된 회원도 LEFT JOIN으로 포함하며, username은 "(탈퇴 #id)" 로 표시
+      -> 탈퇴(삭제)된 회원도 LEFT JOIN으로 포함하며, username은 "(탈퇴)" 로 표시
     """
     d = (date or "").strip()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
@@ -309,9 +309,9 @@ ORDER BY r.created_at DESC, r.id DESC
             a_name = getattr(r, "A_username", None)
             b_name = getattr(r, "B_username", None)
             if a_withdrawn or not a_name:
-                a_name = f"(탈퇴 #{a_uid})" if a_uid is not None else "(탈퇴)"
+                a_name = "(탈퇴)"
             if b_withdrawn or not b_name:
-                b_name = f"(탈퇴 #{b_uid})" if b_uid is not None else "(탈퇴)"
+                b_name = "(탈퇴)"
             items.append(
                 {
                     "A_username": a_name,
