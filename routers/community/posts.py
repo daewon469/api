@@ -1613,7 +1613,7 @@ def list_my_posts_by_type(
     status: Optional[str] = Query(None, description="published | closed"),
     scope: Optional[str] = Query(
         None,
-        description="mine | owners | all (owners/all 은 is_owner 만)",
+        description="mine | owners | all (owners/all 은 오너/관리자)",
     ),
     db: Session = Depends(get_db),
 ):
@@ -1621,15 +1621,17 @@ def list_my_posts_by_type(
     if not user:
         raise HTTPException(status_code=404, detail="Invalid username")
     user_id = int(user.id)
-    is_owner = bool(getattr(user, "is_owner", False))
+    is_privileged = bool(getattr(user, "is_owner", False)) or bool(
+        getattr(user, "admin_acknowledged", False)
+    )
 
     q = db.query(Community_Post).filter(Community_Post.post_type == post_type).order_by(
         Community_Post.created_at.desc(), Community_Post.id.desc()
     )
 
-    # 기본: 본인 글만. 오너는 scope로 오너작성글/전체작성글 전환
+    # 기본: 본인 글만. 오너/관리자는 scope로 오너작성글/전체작성글 전환
     normalized_scope = (scope or "").strip().lower()
-    if is_owner and normalized_scope in ("all", "owners"):
+    if is_privileged and normalized_scope in ("all", "owners"):
         if normalized_scope == "owners":
             q = q.filter(
                 Community_Post.user_id.in_(
