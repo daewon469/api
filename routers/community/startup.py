@@ -1,17 +1,29 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+
 from fastapi import FastAPI
 from sqlalchemy import text
 
 from database import SessionLocal, engine
-
+from models import Community_Post, Community_User, Point
 
 from .logic import _rollover_recruit_and_slide_card_types
+
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
+
+RECRUIT_POST_BACKFILL_AMOUNT = 1000
+RECRUIT_POST_BACKFILL_REASON_PREFIX = "recruit_post_backfill_"
 
 
 def register_startup(app: FastAPI) -> None:
     app.add_event_handler("startup", _startup_enforce_recruit_card_limits)
     app.add_event_handler("startup", _startup_ensure_community_users_custom_columns)
+    app.add_event_handler("startup", _startup_backfill_recruit_post_points)
 
 
 def ensure_schema() -> None:
@@ -72,6 +84,105 @@ def _startup_ensure_community_users_custom_columns() -> None:
     except Exception as e:
         # 스키마 보정 실패는 치명적이지 않게 경고만 출력
         print("[WARN] startup schema ensure(custom_role_codes) failed:", e)
+
+
+def _startup_backfill_recruit_post_points() -> None:
+    """
+    2026-09-18(KST) 이후 신규 구인글(post_type=1)에 1000P를 1회 지급.
+    - reason=recruit_post_backfill_{post_id} 로 재실행해도 중복 지급되지 않음
+    - 등록 시점에 이미 recruit_post 로 지급된 글은 건너뜀
+    """
+    kst = ZoneInfo("Asia/Seoul") if ZoneInfo else timezone(timedelta(hours=9))
+    cutoff = datetime(2026, 9, 18, 0, 0, 0, tzinfo=kst).astimezone(timezone.utc)
+    db = SessionLocal()
+    try:
+        posts = (
+            db.query(Community_Post.id, Community_Post.user_id, Community_Post.created_at)
+            .filter(Community_Post.post_type == 1, Community_Post.created_at >= cutoff)
+            .all()
+        )
+        if not posts:
+            return
+
+        existing_reasons = {
+            str(r)
+            for (r,) in db.query(Point.reason)
+            .filter(Point.reason.like(f"{RECRUIT_POST_BACKFILL_REASON_PREFIX}%"))
+            .all()
+            if r
+        }
+        live_grants = (
+            db.query(Point.user_id, Point.created_at)
+            .filter(Point.reason == "recruit_post")
+            .all()
+        )
+
+        def already_live_granted(user_id: int, created_at) -> bool:
+            if created_at is None:
+                return False
+            post_at = created_at
+            if getattr(post_at, "tzinfo", None) is None:
+                post_at = post_at.replace(tzinfo=timezone.utc)
+            start = post_at - timedelta(minutes=1)
+            end = post_at + timedelta(minutes=10)
+            for uid, granted_at in live_grants:
+                if int(uid) != int(user_id) or granted_at is None:
+                    continue
+                gat = granted_at
+                if getattr(gat, "tzinfo", None) is None:
+                    gat = gat.replace(tzinfo=timezone.utc)
+                if start <= gat <= end:
+                    return True
+            return False
+
+        add_by_user: dict[int, int] = defaultdict(int)
+        new_rows = 0
+        for post_id, user_id, created_at in posts:
+            if user_id is None:
+                continue
+            reason = f"{RECRUIT_POST_BACKFILL_REASON_PREFIX}{int(post_id)}"
+            if reason in existing_reasons:
+                continue
+            if already_live_granted(int(user_id), created_at):
+                continue
+            db.add(
+                Point(
+                    user_id=int(user_id),
+                    reason=reason,
+                    amount=RECRUIT_POST_BACKFILL_AMOUNT,
+                )
+            )
+            add_by_user[int(user_id)] += RECRUIT_POST_BACKFILL_AMOUNT
+            existing_reasons.add(reason)
+            new_rows += 1
+
+        if new_rows == 0:
+            db.rollback()
+            return
+
+        for user_id, amount in add_by_user.items():
+            user = (
+                db.query(Community_User)
+                .filter(Community_User.id == user_id)
+                .with_for_update()
+                .first()
+            )
+            if not user:
+                continue
+            user.point_balance = int(user.point_balance or 0) + amount
+
+        db.commit()
+        print(
+            f"[INFO] recruit post point backfill done: posts={new_rows}, users={len(add_by_user)}"
+        )
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        print("[WARN] startup recruit post point backfill failed:", e)
+    finally:
+        db.close()
 
 
 def _drop_all_constraints_on_table(table_name: str) -> None:

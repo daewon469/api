@@ -600,7 +600,7 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         card_type=card_type,
     )
 
-    # 오너메뉴 구인등록 이벤트 설정을 신규 구인글에 자동 반영
+    # 오너메뉴 구인등록 이벤트 설정을 신규 구인글에 자동 반영 + 포인트 지급
     try:
         from models import Community_UI_Config
         from .ui_config import _normalize_ui_config
@@ -609,8 +609,16 @@ def create_post(username: str, body: PostCreate, db: Session = Depends(get_db)):
         ui_cfg = _normalize_ui_config(getattr(ui_row, "config", None) if ui_row else None)
         ev = ui_cfg.get("recruit_event") if isinstance(ui_cfg, dict) else {}
         if isinstance(ev, dict):
-            post.reward_point_amount = max(0, int(ev.get("reward_point_amount") or 0))
-            post.is_event = bool(ev.get("enabled", False))
+            enabled = bool(ev.get("enabled", False))
+            try:
+                amount = max(0, int(ev.get("reward_point_amount") or 0))
+            except Exception:
+                amount = 0
+            post.reward_point_amount = amount
+            post.is_event = enabled
+            if enabled and amount > 0:
+                user.point_balance = int(user.point_balance or 0) + amount
+                db.add(Point(user_id=int(userId), reason="recruit_post", amount=amount))
     except Exception:
         pass
 
