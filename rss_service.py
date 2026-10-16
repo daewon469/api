@@ -8,6 +8,15 @@ from models import Community_Post
 
 RSS_URL = "https://www.mk.co.kr/rss/50300009/"
 REAL_ESTATE_PATH_PREFIX = "/news/realestate/"
+# 매일경제는 python-requests 기본 User-Agent를 403으로 차단한다.
+RSS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
 
 def parse_pubdate(pub_date: str) -> datetime:
     try:
@@ -16,7 +25,7 @@ def parse_pubdate(pub_date: str) -> datetime:
         return datetime.utcnow()
 
 def fetch_rss_and_save(db: Session):
-    resp = requests.get(RSS_URL, timeout=5)
+    resp = requests.get(RSS_URL, headers=RSS_HEADERS, timeout=15)
     resp.raise_for_status()
 
     root = ET.fromstring(resp.text)
