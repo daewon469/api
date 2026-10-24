@@ -129,9 +129,9 @@ def unread_count_by_username(
         Notification.is_read == False,
     )
     if post_type is not None:
-        # PostgreSQL JSON: data->>'post_type' 은 항상 text ("6")
+        # 범용 JSON 컬럼에는 .astext 가 없다. ->> 로 숫자/문자 모두 텍스트 비교.
         pt = int(post_type)
-        q = q.filter(Notification.data["post_type"].astext == str(pt))
+        q = q.filter(Notification.data.op("->>")("post_type") == str(pt))
     return {"unread_count": q.count()}
 
 
