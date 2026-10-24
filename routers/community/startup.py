@@ -133,6 +133,26 @@ def _ensure_community_users_columns_and_indexes() -> None:
                 )
             )
 
+            # 가입 화면에서 지역을 받지 않으므로 NULL 허용
+            conn.execute(
+                text(
+                    """
+                    DO $$
+                    BEGIN
+                      IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'community_users'
+                          AND column_name = 'region'
+                      ) THEN
+                        EXECUTE 'ALTER TABLE public.community_users ALTER COLUMN region DROP NOT NULL';
+                      END IF;
+                    END $$;
+                    """
+                )
+            )
+
             # 인덱스 추가
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS ix_community_users_is_owner ON public.community_users (is_owner);")

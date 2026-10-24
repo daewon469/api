@@ -98,9 +98,6 @@ def community_signup(req: SignupRequest_C, db: Session = Depends(get_db)):
     if req.phone_number is None:
         return {"status": 4}
 
-    if req.region is None:
-        return {"status": 5}
-
     # 휴대폰 인증 강제
     digits = _normalize_phone(req.phone_number)
     if not _is_valid_korean_phone(digits):
