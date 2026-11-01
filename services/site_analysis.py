@@ -14,6 +14,22 @@ CHAPTER_ORDER = [
     "투자가치",
 ]
 
+# 오너 메뉴 속도 비교용. 없으면 아래 기본 프롬프트(5개·2~3줄)를 쓴다.
+VARIANT_PROFILES: dict[str, dict[str, Any]] = {
+    "1-1": {
+        "chapters": list(CHAPTER_ORDER),
+        "line_rule": "항목당 4~5줄",
+    },
+    "1-2": {
+        "chapters": ["건축개요", "입지/교통", "투자가치"],
+        "line_rule": "항목당 7~8줄",
+    },
+    "1-3": {
+        "chapters": list(CHAPTER_ORDER),
+        "line_rule": "항목당 7~8줄",
+    },
+}
+
 
 def _thinking_config(model: str) -> dict[str, Any]:
     """
@@ -28,40 +44,18 @@ def _thinking_config(model: str) -> dict[str, Any]:
     return {"thinkingLevel": "minimal"}
 
 
-def build_site_analysis_prompt(body: dict[str, Any]) -> str:
+def _site_context(body: dict[str, Any]) -> tuple[str, str]:
     site_name = str(body.get("site_name") or "").strip()
     title = str(body.get("title") or "").strip()
     site_label = site_name or title or "해당 현장"
     region = " ".join(
         [p for p in [body.get("province"), body.get("city")] if p]
     ).strip() or "-"
-
-    chapters = list(CHAPTER_ORDER)
-    chapter_lines: list[str] = []
-    for i, name in enumerate(chapters, start=1):
-        chapter_lines.append(f"**{i}) {name}**")
-        chapter_lines.append("")
-
-    # 본문은 과도하게 길면 잘라 입력 토큰 절약
     content = str(body.get("content") or "-")
     if len(content) > 900:
         content = content[:900] + "…"
-
-    last = len(chapters)
-    return "\n".join(
+    fields = "\n".join(
         [
-            "[역할] 분양 상담용 현장 브리핑을 짧고 정확하게 정리하는 AI.",
-            "",
-            "[출력 규칙]",
-            f"1. 제목과 1)~{last}) 항목만 출력. 설계특징, 꺾기멘트, 실전 브리핑은 쓰지 말 것.",
-            "2. 항목당 2~3줄. 구어체(해요체). 건축개요=단지·브랜드, 입지/교통=접근성, 생활/학군=상권·학교, 미래가치=호재, 투자가치=수요·환금성.",
-            "3. 서론/면책/수수료·급여 이야기 금지. 모르는 수치는 지어내지 말 것.",
-            "4. 아래 항목 이름과 순서를 그대로 유지.",
-            "",
-            "[출력 포맷]",
-            f"**[현장명: {site_label}]**",
-            "",
-            *chapter_lines,
             "[현장 입력값]",
             f"[제목] {body.get('title') or '-'}",
             f"[현장명] {body.get('site_name') or '-'}",
@@ -72,10 +66,65 @@ def build_site_analysis_prompt(body: dict[str, Any]) -> str:
             f"[사업지] {body.get('business_address') or '-'}",
             f"[대행사] {body.get('company_agency') or '-'}",
             f"[본문] {content}",
+        ]
+    )
+    return site_label, fields
+
+
+def _chapter_block(chapters: list[str]) -> list[str]:
+    lines: list[str] = []
+    for i, name in enumerate(chapters, start=1):
+        lines.append(f"**{i}) {name}**")
+        lines.append("")
+    return lines
+
+
+def build_site_analysis_prompt(body: dict[str, Any]) -> str:
+    site_label, fields = _site_context(body)
+    variant = str(body.get("variant") or "").strip()
+    profile = VARIANT_PROFILES.get(variant)
+    if profile:
+        chapters = list(profile["chapters"])
+        line_rule = str(profile["line_rule"])
+        joined = ", ".join(chapters)
+        rules = [
+            f"1. 제목과 다음 {len(chapters)}개 항목만 출력: {joined}. 다른 항목은 쓰지 말 것.",
+            f"2. {line_rule}. 그보다 짧거나 길지 않게. 구어체(해요체).",
+            "3. 서론/면책/수수료·급여 이야기 금지. 모르는 수치는 지어내지 말 것.",
+            "4. 아래 항목 이름과 순서를 그대로 유지.",
+        ]
+    else:
+        chapters = list(CHAPTER_ORDER)
+        rules = [
+            f"1. 제목과 1)~{len(chapters)}) 항목만 출력. 설계특징, 꺾기멘트, 실전 브리핑은 쓰지 말 것.",
+            "2. 항목당 2~3줄. 구어체(해요체). 건축개요=단지·브랜드, 입지/교통=접근성, 생활/학군=상권·학교, 미래가치=호재, 투자가치=수요·환금성.",
+            "3. 서론/면책/수수료·급여 이야기 금지. 모르는 수치는 지어내지 말 것.",
+            "4. 아래 항목 이름과 순서를 그대로 유지.",
+        ]
+
+    return "\n".join(
+        [
+            "[역할] 분양 상담용 현장 브리핑을 짧고 정확하게 정리하는 AI.",
+            "",
+            "[출력 규칙]",
+            *rules,
+            "",
+            "[출력 포맷]",
+            f"**[현장명: {site_label}]**",
+            "",
+            *_chapter_block(chapters),
+            fields,
             "",
             "위 포맷으로 해당 현장 리포트만 출력.",
         ]
     )
+
+
+def max_output_tokens_for(body: dict[str, Any]) -> int:
+    variant = str(body.get("variant") or "").strip()
+    if variant in VARIANT_PROFILES:
+        return 3072
+    return 2048
 
 
 def _error_message(data: dict[str, Any], fallback: str) -> str:
@@ -101,12 +150,17 @@ def _extract_text(data: dict[str, Any]) -> str:
     return "\n".join(chunks).strip()
 
 
-def _post_generate(url: str, prompt: str, generation_config: dict[str, Any]) -> requests.Response:
+def _post_generate(
+    url: str,
+    prompt: str,
+    generation_config: dict[str, Any],
+    timeout: int = 60,
+) -> requests.Response:
     payload = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": generation_config,
     }
-    return requests.post(url, json=payload, timeout=60)
+    return requests.post(url, json=payload, timeout=timeout)
 
 
 def request_gemini_site_analysis(body: dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
@@ -126,14 +180,16 @@ def request_gemini_site_analysis(body: dict[str, Any]) -> tuple[Optional[str], O
         f"{model}:generateContent?key={api_key}"
     )
     prompt = build_site_analysis_prompt(body)
+    max_tokens = max_output_tokens_for(body)
+    request_timeout = 90 if max_tokens > 2048 else 60
     generation_config: dict[str, Any] = {
         "temperature": 0.2,
-        "maxOutputTokens": 2048,
+        "maxOutputTokens": max_tokens,
         "thinkingConfig": _thinking_config(model),
     }
 
     try:
-        res = _post_generate(url, prompt, generation_config)
+        res = _post_generate(url, prompt, generation_config, request_timeout)
         data = res.json() if res.content else {}
         if (
             res.status_code == 400
@@ -142,9 +198,9 @@ def request_gemini_site_analysis(body: dict[str, Any]) -> tuple[Optional[str], O
         ):
             generation_config = {
                 "temperature": 0.2,
-                "maxOutputTokens": 2048,
+                "maxOutputTokens": max_tokens,
             }
-            res = _post_generate(url, prompt, generation_config)
+            res = _post_generate(url, prompt, generation_config, request_timeout)
             data = res.json() if res.content else {}
 
         if res.status_code >= 400:

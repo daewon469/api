@@ -23,6 +23,8 @@ class SiteAnalysisIn(BaseModel):
     content: Optional[str] = None
     company_agency: Optional[str] = None
     chapter_order: Optional[list[str]] = None
+    # 오너 속도 비교: 1-1 | 1-2 | 1-3. 없으면 기존 5개·2~3줄.
+    variant: Optional[str] = None
 
 
 class SiteAnalysisOut(BaseModel):
