@@ -21,8 +21,8 @@ VARIANT_PROFILES: dict[str, dict[str, Any]] = {
         "line_rule": "항목당 4~5줄",
     },
     "1-2": {
-        "chapters": ["건축개요", "입지/교통", "투자가치"],
-        "line_rule": "항목당 7~8줄",
+        "chapters": ["건축개요", "학군/교통", "투자가치"],
+        "line_rule": "항목당 7~8줄. 학군/교통은 학교·학군과 교통·접근성을 한 항목에 쓴다",
     },
     "1-3": {
         "chapters": list(CHAPTER_ORDER),
